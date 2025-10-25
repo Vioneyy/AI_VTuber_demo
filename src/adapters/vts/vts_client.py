@@ -38,10 +38,22 @@ class VTSClient:
         # Emotion state tracking for auto motion
         self._current_emotion: str = "neutral"
 
+    def _ws_is_closed(self) -> bool:
+        if self._ws is None:
+            return True
+        try:
+            closed_attr = getattr(self._ws, "closed", None)
+            if closed_attr is not None:
+                return bool(closed_attr)
+            code = getattr(self._ws, "close_code", None)
+            return code is not None
+        except Exception:
+            return False
+
     async def connect(self):
         """Connect to VTS with proper session management"""
         # ป้องกันการ connect ซ้ำ
-        if self._ws and not self._ws.closed and self._is_connected:
+        if self._ws and not self._ws_is_closed() and self._is_connected:
             print("[VTS] Already connected")
             return
         
@@ -151,7 +163,7 @@ class VTSClient:
 
     async def set_expression(self, expression: str, active: bool = True):
         """เปิด/ปิด expression ตามชื่อ"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         msg = {
@@ -173,7 +185,7 @@ class VTSClient:
 
     async def set_parameter(self, name: str, value: float):
         """ปรับค่า parameter เดี่ยว"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         msg = {
@@ -195,7 +207,7 @@ class VTSClient:
 
     async def _build_param_mapping(self):
         """ดึงรายชื่อพารามิเตอร์ของโมเดลจาก VTS และสร้าง mapping อัตโนมัติ"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         try:
@@ -305,7 +317,7 @@ class VTSClient:
 
     async def inject_parameters(self, values: Dict[str, float], weight: Optional[float] = None):
         """ส่งค่า parameter หลายตัวพร้อมกัน"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         # Throttle
@@ -351,7 +363,7 @@ class VTSClient:
             "data": {
                 "parameterValues": data_values,
                 "faceFound": True,
-                "mode": "set"
+                "mode": "add"
             }
         }
         
@@ -364,7 +376,7 @@ class VTSClient:
 
     async def trigger_hotkey_by_name(self, name: str):
         """ทริกเกอร์ hotkey โดยใช้ชื่อ"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         try:
@@ -374,7 +386,7 @@ class VTSClient:
                 "messageType": "HotkeyTriggerRequest",
                 "requestID": "trigger-hotkey",
                 "data": {
-                    "hotkeyID": name
+                    "hotkeyName": name
                 }
             }
             async with self._ws_lock:
@@ -412,7 +424,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -477,7 +489,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -549,7 +561,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -609,7 +621,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -686,7 +698,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -758,7 +770,7 @@ class VTSClient:
             
             while True:
                 try:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         await asyncio.sleep(1.0)
                         continue
                     
@@ -826,7 +838,7 @@ class VTSClient:
 
     async def apply_emotion(self, emotion_config: Dict[str, Any]):
         """ใช้อีโมทกับโมเดล"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         # ดึง emotion key จาก config
@@ -903,7 +915,7 @@ class VTSClient:
 
     async def lipsync_wav(self, wav_path: str, param_name: Optional[str] = None):
         """อ่านไฟล์ WAV และอัปเดตพารามิเตอร์ปากแบบเรียลไทม์"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         import wave, struct, math
@@ -924,7 +936,7 @@ class VTSClient:
                 
                 idx = 0
                 while idx < nframes:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         break
                     
                     to_read = min(block_size, nframes - idx)
@@ -967,7 +979,7 @@ class VTSClient:
 
     async def lipsync_bytes(self, wav_bytes: bytes, param_name: Optional[str] = None):
         """ลิปซิงก์จาก WAV bytes ในหน่วยความจำ"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         import wave, struct, math, io
@@ -992,7 +1004,7 @@ class VTSClient:
                 
                 idx = 0
                 while idx < nframes:
-                    if not self._is_connected or not self._ws or self._ws.closed:
+                    if not self._is_connected or not self._ws or self._ws_is_closed():
                         break
                     
                     to_read = min(block_size, nframes - idx)
@@ -1256,7 +1268,7 @@ class VTSClient:
 
     async def _ensure_custom_parameters(self):
         """สร้างพารามิเตอร์ที่จำเป็น"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return
         
         # สำหรับ Hiyori ไม่จำเป็นต้องสร้างพารามิเตอร์เอง เพราะมีอยู่แล้ว
@@ -1287,7 +1299,7 @@ class VTSClient:
         
         while True:
             try:
-                if not self._is_connected or not self._ws or self._ws.closed:
+                if not self._is_connected or not self._ws or self._ws_is_closed():
                     await asyncio.sleep(5.0)
                     continue
                 
@@ -1321,7 +1333,7 @@ class VTSClient:
 
     async def _list_model_hotkeys(self) -> list[dict]:
         """ดึงรายชื่อ hotkeys ทั้งหมดของโมเดล"""
-        if not self._ws or self._ws.closed:
+        if not self._ws or self._ws_is_closed():
             return []
         
         try:
