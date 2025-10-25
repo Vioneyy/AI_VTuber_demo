@@ -259,6 +259,73 @@ class DiscordAdapter:
                 except Exception as e:
                     await ctx.send(f"TTS ล้มเหลว: {e}")
 
+        @self.bot.command(name="emotion")
+        async def emotion(ctx: commands.Context, emotion_type: str):
+            """ทริกเกอร์อีโมทแบบ manual
+            
+            ใช้งาน: !emotion <ประเภท>
+            ประเภทที่รองรับ: thinking, happy, sad, angry, surprised
+            """
+            if not self.vts_client:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+                
+            valid_emotions = ['thinking', 'happy', 'sad', 'angry', 'surprised']
+            emotion_type = emotion_type.lower()
+            
+            if emotion_type not in valid_emotions:
+                await ctx.send(f"อีโมทไม่ถูกต้อง ใช้ได้: {', '.join(valid_emotions)}")
+                return
+                
+            try:
+                await self.vts_client.trigger_manual_emotion(emotion_type)
+                await ctx.send(f"✅ ทริกเกอร์อีโมท: {emotion_type}")
+            except Exception as e:
+                await ctx.send(f"ทริกเกอร์อีโมทล้มเหลว: {e}")
+
+        @self.bot.command(name="reset_emotion")
+        async def reset_emotion(ctx: commands.Context):
+            """รีเซ็ตอีโมทกลับเป็นปกติ"""
+            if not self.vts_client:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+                
+            try:
+                await self.vts_client.reset_manual_emotion()
+                await ctx.send("✅ รีเซ็ตอีโมทเรียบร้อย")
+            except Exception as e:
+                await ctx.send(f"รีเซ็ตอีโมทล้มเหลว: {e}")
+
+        @self.bot.command(name="thinking")
+        async def thinking(ctx: commands.Context):
+            """ทริกเกอร์อีโมท 'กำลังคิด' (shortcut)"""
+            if self.vts_client:
+                try:
+                    await self.vts_client.trigger_manual_emotion('thinking')
+                    await ctx.send("🤔 กำลังคิด...")
+                except Exception as e:
+                    await ctx.send(f"ล้มเหลว: {e}")
+
+        @self.bot.command(name="happy")
+        async def happy(ctx: commands.Context):
+            """ทริกเกอร์อีโมท 'มีความสุข' (shortcut)"""
+            if self.vts_client:
+                try:
+                    await self.vts_client.trigger_manual_emotion('happy')
+                    await ctx.send("😊 มีความสุข!")
+                except Exception as e:
+                    await ctx.send(f"ล้มเหลว: {e}")
+
+        @self.bot.command(name="sad")
+        async def sad(ctx: commands.Context):
+            """ทริกเกอร์อีโมท 'เศร้า' (shortcut)"""
+            if self.vts_client:
+                try:
+                    await self.vts_client.trigger_manual_emotion('sad')
+                    await ctx.send("😢 เศร้า...")
+                except Exception as e:
+                    await ctx.send(f"ล้มเหลว: {e}")
+
     def _load_system_prompt(self) -> str:
         # โหลด system prompt เดียวกับ main.py
         try:

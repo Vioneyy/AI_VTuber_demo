@@ -51,6 +51,25 @@ class Settings(BaseSettings):
     RANDOM_SMILE_MAX_DURATION: float = Field(default=8.0)
     RANDOM_SMILE_FADE_TIME: float = Field(default=0.8)
 
+    # Auto gaze settings
+    AUTO_GAZE_ENABLED: bool = Field(default=True)
+    
+    # Micro expressions settings
+    MICRO_EXPRESSIONS_ENABLED: bool = Field(default=True)
+    MICRO_EXPR_MIN_INTERVAL: float = Field(default=5.0)
+    MICRO_EXPR_MAX_INTERVAL: float = Field(default=18.0)
+
+    # Random animations settings (ใช้ไฟล์อนิเมชันที่ให้มา)
+    AUTO_ANIMATIONS_ENABLED: bool = Field(default=True)
+    ANIM_MIN_INTERVAL_SEC: float = Field(default=25.0)  # นานขึ้น - สุ่มนานๆครั้ง
+    ANIM_MAX_INTERVAL_SEC: float = Field(default=60.0)  # นานขึ้น - สุ่มนานๆครั้ง
+    ANIM_TRIGGER_CHANCE: float = Field(default=0.3)     # ลดโอกาส - สุ่มนานๆครั้ง
+
+    # Manual emotion settings
+    MANUAL_EMOTIONS_ENABLED: bool = Field(default=True)
+    MANUAL_EMOTION_DURATION_SEC: float = Field(default=5.0)  # ระยะเวลาที่อีโมทจะแสดง (วินาที)
+    MANUAL_EMOTION_AUTO_RESET: bool = Field(default=True)   # รีเซ็ตอีโมทอัตโนมัติหรือไม่
+
     # Emotion hotkey mapping
     VTS_HK_THINKING: str | None = Field(default="thinking")
     VTS_HK_NEUTRAL: str | None = Field(default="Neutral")
@@ -65,12 +84,13 @@ class Settings(BaseSettings):
     F1_EMOTION: str = Field(default="Neutral")
     F2_EMOTION: str = Field(default="Happy")
     F3_EMOTION: str = Field(default="Sad")
-    # Emotion trigger probabilities
-    EMOTION_TRIGGER_PROB_HAPPY: float = Field(default=0.6)
-    EMOTION_TRIGGER_PROB_SAD: float = Field(default=0.5)
-    EMOTION_TRIGGER_PROB_ANGRY: float = Field(default=0.4)
-    EMOTION_TRIGGER_PROB_SURPRISED: float = Field(default=0.5)
-    EMOTION_TRIGGER_PROB_CALM: float = Field(default=0.3)
+    # Emotion trigger probabilities (ลดลงเพื่อให้แสดงอีโมทนานๆครั้ง)
+    EMOTION_TRIGGER_PROBABILITY: float = Field(default=0.15)  # ความน่าจะเป็นพื้นฐาน - ลดลงมาก
+    EMOTION_TRIGGER_PROB_HAPPY: float = Field(default=0.2)    # ลดลงจาก 0.6
+    EMOTION_TRIGGER_PROB_SAD: float = Field(default=0.15)     # ลดลงจาก 0.5
+    EMOTION_TRIGGER_PROB_ANGRY: float = Field(default=0.1)    # ลดลงจาก 0.4
+    EMOTION_TRIGGER_PROB_SURPRISED: float = Field(default=0.25) # ลดลงจาก 0.5
+    EMOTION_TRIGGER_PROB_CALM: float = Field(default=0.1)     # ลดลงจาก 0.3
     EMOTION_SAD_FALLBACK_NEUTRAL_PROB: float = Field(default=0.5)
 
     # LLM & runtime

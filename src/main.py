@@ -105,6 +105,18 @@ async def main():
             # เริ่มการยิ้มสุ่ม (ถ้าเปิดใช้งาน)
             if getattr(settings, "RANDOM_SMILE_ENABLED", True):
                 await vts.start_random_smile()
+            
+            # มองรอบ ๆ แบบสุ่มตามโมเดล (ถ้าเปิดใช้งานและโมเดลรองรับ)
+            if getattr(settings, "AUTO_GAZE_ENABLED", True):
+                await vts.start_auto_gaze()
+            
+            # แสดง micro-expressions แบบสุ่ม (ถ้าเปิดใช้งานและโมเดลรองรับ)
+            if getattr(settings, "MICRO_EXPRESSIONS_ENABLED", True):
+                await vts.start_micro_expressions()
+
+            # เล่นอนิเมชันตาม hotkeys ของโมเดลแบบสุ่ม (ถ้าเปิดใช้งาน)
+            if getattr(settings, "AUTO_ANIMATIONS_ENABLED", True):
+                await vts.start_random_animations()
         # Start global emotion hotkeys (F1=Neutral, F2=Happy, F3=Sad)
         try:
             hk = EmotionHotkeyController(vts)
