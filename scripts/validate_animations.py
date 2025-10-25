@@ -118,7 +118,7 @@ async def check_vts_hotkeys_and_trigger() -> None:
 
     # List hotkeys
     try:
-        hotkeys = await vts._list_model_hotkeys()  # private but useful here
+        hotkeys = await vts.list_model_hotkeys()  # use public method
         print(f"[VTS] Hotkeys in current model: {len(hotkeys)}")
         # Filter animation-like hotkeys
         def is_anim(hk: Dict[str, Any]) -> bool:

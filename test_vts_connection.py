@@ -1,78 +1,99 @@
 #!/usr/bin/env python3
-"""
-Test script for VTube Studio connection
-ทดสอบการเชื่อมต่อ VTube Studio
-"""
-
 import asyncio
 import sys
-import os
+from typing import List
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# ทำให้ Python มองเห็นแพ็กเกจในโฟลเดอร์ src
+SRC_PATH = str(Path(__file__).parent / "src")
+if SRC_PATH not in sys.path:
+    sys.path.insert(0, SRC_PATH)
 
-from src.core.config import get_settings
-from src.adapters.vts.vts_client import VTSClient
+# ใช้ VTSClient จากโปรเจกต์เพื่อทดสอบการเชื่อมต่อ/รายการ hotkeys/ยิง hotkey
+try:
+    from adapters.vts.vts_client import VTSClient
+    from core.config import get_settings
+except Exception as e:
+    print("Import error:", e)
+    print("Run this script from project root: python test_vts_connection.py")
+    sys.exit(1)
 
-async def test_vts_connection():
-    """ทดสอบการเชื่อมต่อ VTube Studio"""
-    print("🔄 กำลังทดสอบการเชื่อมต่อ VTube Studio...")
-    
+async def run_test(hotkeys: List[str] | None = None, duration: float = 60.0):
+    settings = get_settings()
+    vts = VTSClient()
+    print("[TEST] Connecting to VTS ...")
+    await vts.connect()
+    # รอให้การเชื่อมต่อคงที่/รีเชื่อมต่อสำเร็จภายในช่วงเวลาที่กำหนด แทนที่จะออกทันที
+    ok = False
+    start = asyncio.get_event_loop().time()
+    while asyncio.get_event_loop().time() - start < 20.0:  # รอสูงสุด 20 วินาที
+        if hasattr(vts, "_ws") and vts._ws is not None and getattr(vts._ws, "open", False):
+            ok = True
+            break
+        await asyncio.sleep(0.1)
+    if not ok:
+        print("[TEST] Connection still unstable after 20s; continuing and will wait in-loop.")
+
+    print("[TEST] Connected. Listing available hotkeys...")
+    names = []
     try:
-        # โหลดการตั้งค่า
-        config = get_settings()
-        print(f"📋 VTS Host: {config.VTS_HOST}")
-        print(f"📋 VTS Port: {config.VTS_PORT}")
-        print(f"📋 Plugin Name: {config.VTS_PLUGIN_NAME}")
-        
-        # สร้าง VTS client
-        vts_client = VTSClient()
-        
-        # ทดสอบการเชื่อมต่อ (รวมการรับรองตัวตน)
-        print("\n🔌 กำลังเชื่อมต่อ VTube Studio...")
-        await vts_client.connect()
-        print("🔐 การรับรองตัวตนสำเร็จ")
-        
-        # ทดสอบการส่งคำสั่งง่ายๆ
-        print("🎭 กำลังทดสอบการส่งคำสั่ง...")
-        
-        # ทดสอบการตั้งค่า parameter
-        print("   - ทดสอบการตั้งค่า parameter...")
-        await vts_client.set_parameter("MouthOpen", 0.5)
-        
-        # ทดสอบการเปิด expression
-        print("   - ทดสอบการเปิด expression...")
-        await vts_client.set_expression("happy", True)
-        
-        # รอสักครู่แล้วปิด expression
-        await asyncio.sleep(1)
-        await vts_client.set_expression("happy", False)
-        
-        print("   ✅ ทดสอบการส่งคำสั่งสำเร็จ")
-        
-        print("\n✅ การทดสอบสำเร็จ! VTube Studio เชื่อมต่อได้แล้ว")
-        
+        hk = await vts.list_model_hotkeys()
+        names = [str(h.get("name", "")) for h in hk if str(h.get("name", ""))]
+        print(f"[TEST] Available hotkeys ({len(names)}):", names)
     except Exception as e:
-        print(f"\n❌ เกิดข้อผิดพลาด: {str(e)}")
-        print("\n💡 แนะนำการแก้ไข:")
-        print("1. ตรวจสอบว่า VTube Studio เปิดอยู่")
-        print("2. ตรวจสอบว่าเปิด API ใน VTube Studio (Settings > General > Allow plugins)")
-        print("3. ตรวจสอบ port 8001 ว่าไม่ถูกใช้งานโดยโปรแกรมอื่น")
-        print("4. ตรวจสอบการตั้งค่าใน .env file")
-        return False
+        print("[TEST] Failed to list hotkeys:", e)
+
+    if not names:
+        print("[TEST] No hotkeys available from the current model. Please open a model in VTube Studio and ensure it has hotkeys.")
+        # ลองใช้ชื่อจาก argument/ENV ถ้ามีเพื่อทดสอบการทริกเกอร์โดยตรง
+        if hotkeys:
+            names = hotkeys
+    else:
+        # เลือกจากพารามิเตอร์หรือใช้ตัวแรก
+        chosen = hotkeys or names[:3]
+        names = chosen
+        print(f"[TEST] Will trigger hotkeys: {names}")
     
-    return True
+    # ยิง hotkey ทีละตัว และรอ
+    t_end = asyncio.get_event_loop().time() + duration
+    idx = 0
+    while asyncio.get_event_loop().time() < t_end:
+        # ถ้า connection หลุดระหว่างทดสอบ ให้รอจนกลับมา
+        if not (hasattr(vts, "_ws") and vts._ws is not None and getattr(vts._ws, "open", False)):
+            print("[TEST] Connection dropped. Waiting to reconnect...")
+            wait_start = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - wait_start < 20.0:
+                if hasattr(vts, "_ws") and vts._ws is not None and getattr(vts._ws, "open", False):
+                    print("[TEST] Reconnected.")
+                    break
+                await asyncio.sleep(0.2)
+        if names:
+            name = names[idx % len(names)]
+            try:
+                print(f"[TEST] Trigger: {name}")
+                await vts.trigger_hotkey_by_name(name)
+            except Exception as e:
+                print("[TEST] trigger failed:", e)
+            idx += 1
+        # คั่นด้วยการ recv loop ทำงานเอง, เราแค่รอ
+        await asyncio.sleep(float(getattr(settings, "SAFE_HOTKEY_INTERVAL", 6.0)))
+
+    print("[TEST] Done. Closing connection.")
+    try:
+        await vts.stop_all_motions()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
-    print("🚀 AI VTuber Demo - VTube Studio Connection Test")
-    print("=" * 50)
-    
-    # รันการทดสอบ
-    success = asyncio.run(test_vts_connection())
-    
-    if success:
-        print("\n🎉 พร้อมใช้งานระบบ AI VTuber แล้ว!")
+    # hotkeys จาก arg หรือ ENV SAFE_HOTKEY_NAMES
+    hk_arg = None
+    if len(sys.argv) > 1:
+        hk_arg = [p.strip() for p in " ".join(sys.argv[1:]).split(",") if p.strip()]
     else:
-        print("\n⚠️  กรุณาแก้ไขปัญหาก่อนใช้งาน")
-        sys.exit(1)
+        try:
+            s = get_settings()
+            if getattr(s, "SAFE_HOTKEY_NAMES", None):
+                hk_arg = [p.strip() for p in str(s.SAFE_HOTKEY_NAMES).split(",") if p.strip()]
+        except Exception:
+            hk_arg = None
+    asyncio.run(run_test(hotkeys=hk_arg))

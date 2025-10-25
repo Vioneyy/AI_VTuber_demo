@@ -53,9 +53,8 @@ async def main():
         resp: Response = llm.generate_reply(msg.text, system_prompt, persona.data)
         resp.text = policy.sanitize_output(resp.text)
         emo_cfg = persona.get_emotion_config(resp.emotion.value)
-        # ส่ง emotion key เพื่อให้ VTSClient แมป hotkey ได้ถูกต้อง
-        emo_cfg["_emotion_key"] = resp.emotion.value
-        await vts.apply_emotion(emo_cfg)
+        # ส่ง emotion key โดยตรงให้ VTSClient
+        await vts.apply_emotion(resp.emotion.value, intensity=1.0)
 
         audio = tts_engine.speak(
             resp.text,
@@ -90,7 +89,11 @@ async def main():
     # เริ่มเชื่อมต่อ VTS และ idle motion
     try:
         await vts.connect()
-        if settings.IDLE_MOTION_ENABLED:
+        if getattr(settings, "SAFE_MOTION_MODE", False):
+            # โหมดปลอดภัย: ใช้ hotkey เป็นหลัก ลดการ inject
+            await vts.start_safe_motion_hotkeys()
+            print("[VTS] เริ่ม Safe Motion ด้วย hotkey")
+        elif settings.IDLE_MOTION_ENABLED:
             # เริ่ม idle motion
             await vts.start_idle_motion()
             
@@ -106,17 +109,7 @@ async def main():
             if getattr(settings, "RANDOM_SMILE_ENABLED", True):
                 await vts.start_random_smile()
             
-            # มองรอบ ๆ แบบสุ่มตามโมเดล (ถ้าเปิดใช้งานและโมเดลรองรับ)
-            if getattr(settings, "AUTO_GAZE_ENABLED", True):
-                await vts.start_auto_gaze()
-            
-            # แสดง micro-expressions แบบสุ่ม (ถ้าเปิดใช้งานและโมเดลรองรับ)
-            if getattr(settings, "MICRO_EXPRESSIONS_ENABLED", True):
-                await vts.start_micro_expressions()
-
-            # เล่นอนิเมชันตาม hotkeys ของโมเดลแบบสุ่ม (ถ้าเปิดใช้งาน)
-            if getattr(settings, "AUTO_ANIMATIONS_ENABLED", True):
-                await vts.start_random_animations()
+            print("[VTS] เริ่มต้น idle motions สำเร็จ")
         # Start global emotion hotkeys (F1=Neutral, F2=Happy, F3=Sad)
         try:
             hk = EmotionHotkeyController(vts)
