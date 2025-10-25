@@ -128,6 +128,17 @@ class Settings(BaseSettings):
     LIPSYNC_PARAM: str = Field(default="MouthOpen")
     LIPSYNC_FRAME_MS: float = Field(default=30.0)
 
+    # Discord voice STT toggle
+    DISCORD_VOICE_STT_ENABLED: bool = Field(default=True)
+
+    # Whisper.cpp STT settings
+    WHISPER_CPP_BIN_PATH: str | None = None
+    WHISPER_CPP_MODEL_PATH: str | None = None
+    WHISPER_CPP_LANG: str = Field(default="th")
+    WHISPER_CPP_THREADS: int = Field(default=4)
+    WHISPER_CPP_NGL: int = Field(default=35)
+    WHISPER_CPP_TIMEOUT_MS: int = Field(default=5000)
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()

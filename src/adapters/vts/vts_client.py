@@ -35,6 +35,8 @@ class VTSClient:
         # Speaking state tracking
         self._is_speaking: bool = False
         self._speaking_lock = Lock()
+        # Emotion state tracking for auto motion
+        self._current_emotion: str = "neutral"
 
     async def connect(self):
         """Connect to VTS with proper session management"""
@@ -414,10 +416,32 @@ class VTSClient:
                         await asyncio.sleep(1.0)
                         continue
                     
-                    # ลดการเคลื่อนไหวขณะพูด
+                    # ลดการเคลื่อนไหวขณะพูด และปรับตามอารมณ์
                     async with self._speaking_lock:
-                        current_amp = amp * 0.2 if self._is_speaking else amp
-                        current_interval = base_interval * 2.0 if self._is_speaking else base_interval
+                        speak_amp = amp * 0.2 if self._is_speaking else amp
+                        speak_interval = base_interval * 2.0 if self._is_speaking else base_interval
+                    
+                    emo = getattr(self, "_current_emotion", "neutral").lower()
+                    amp_mult = 1.0
+                    interval_mult = 1.0
+                    if emo in ("happy", "joy", "excited"):
+                        amp_mult = 1.3
+                        interval_mult = 0.85
+                    elif emo in ("sad", "disappointed", "upset"):
+                        amp_mult = 0.6
+                        interval_mult = 1.35
+                    elif emo in ("angry", "frustrated", "annoyed"):
+                        amp_mult = 1.6
+                        interval_mult = 0.75
+                    elif emo in ("surprised", "shocked", "amazed"):
+                        amp_mult = 1.2
+                        interval_mult = 0.9
+                    elif emo in ("calm",):
+                        amp_mult = 0.5
+                        interval_mult = 1.6
+                    
+                    current_amp = speak_amp * amp_mult
+                    current_interval = speak_interval * interval_mult
                     
                     x_pos = random.uniform(-current_amp, current_amp)
                     y_pos = random.uniform(-current_amp * 0.3, current_amp * 0.3)
@@ -457,14 +481,29 @@ class VTSClient:
                         await asyncio.sleep(1.0)
                         continue
                     
+                    # ปรับความถี่และระยะเวลาปิดตาตามอารมณ์
+                    emo = getattr(self, "_current_emotion", "neutral").lower()
+                    min_adj, max_adj, close_adj = min_i, max_i, float(close_ms)
+                    if emo in ("happy", "joy", "excited"):
+                        min_adj *= 0.9; max_adj *= 0.9
+                    elif emo in ("sad", "disappointed", "upset"):
+                        min_adj *= 1.2; max_adj *= 1.3
+                        close_adj *= 1.3
+                    elif emo in ("calm",):
+                        min_adj *= 1.4; max_adj *= 1.6
+                        close_adj *= 1.5
+                    elif emo in ("surprised", "shocked", "amazed"):
+                        min_adj *= 0.8; max_adj *= 0.85
+                        close_adj *= 0.9
+                    
                     if random.random() < 0.1:
                         interval = random.uniform(0.5, 15.0)
                     else:
-                        interval = random.uniform(min_i, max_i)
+                        interval = random.uniform(min_adj, max_adj)
                     
                     await asyncio.sleep(interval)
                     
-                    close_time = random.uniform(close_ms * 0.5, close_ms * 2.0) / 1000.0
+                    close_time = random.uniform(close_adj * 0.5, close_adj * 2.0) / 1000.0
                     
                     # ปิดตา
                     await self.inject_parameters({"EyeLeftOpen": 0.0, "EyeRightOpen": 0.0}, weight=1.0)
@@ -480,6 +519,13 @@ class VTSClient:
                             await self.inject_parameters({"EyeLeftOpen": 0.0, "EyeRightOpen": 0.0}, weight=1.0)
                             await asyncio.sleep(random.uniform(close_time * 0.5, close_time))
                             await self.inject_parameters({"EyeLeftOpen": 1.0, "EyeRightOpen": 1.0}, weight=1.0)
+                    
+                    # โหมด sad/calm ให้มีโอกาสหลับตานาน ๆ เป็นพิเศษ
+                    if emo in ("sad", "calm") and random.random() < 0.2:
+                        long_close = random.uniform(0.6, 1.4)
+                        await self.inject_parameters({"EyeLeftOpen": 0.0, "EyeRightOpen": 0.0}, weight=1.0)
+                        await asyncio.sleep(long_close)
+                        await self.inject_parameters({"EyeLeftOpen": 1.0, "EyeRightOpen": 1.0}, weight=1.0)
                             
                 except asyncio.CancelledError:
                     break
@@ -785,6 +831,8 @@ class VTSClient:
         
         # ดึง emotion key จาก config
         emotion_key = emotion_config.get("_emotion_key", "neutral")
+        # อัปเดตสถานะอารมณ์ล่าสุดเพื่อให้ idle/blink ปรับตาม
+        self._current_emotion = str(emotion_key).lower()
         intensity = float(emotion_config.get("intensity", 1.0))
         
         # ตรวจสอบว่าจะทริกเกอร์หรือไม่

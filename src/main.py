@@ -127,15 +127,29 @@ async def main():
     except Exception:
         pass
 
-    # เริ่มตัวอ่าน YouTube และตัวจัดคิว
-    yt = YouTubeLiveAdapter(scheduler)
-    yt.start()
+    # เริ่มตัวจัดคิว
     asyncio.create_task(scheduler.start(worker))
 
-    # เริ่มบอท Discord ใน thread เพื่อไม่บล็อก event loop
-    discord_adapter = DiscordAdapter(scheduler, llm, tts_engine, vts)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, discord_adapter.run)
+    # เริ่มตัวอ่าน YouTube หากตั้งค่า STREAM ID
+    if settings.YOUTUBE_STREAM_ID:
+        yt = YouTubeLiveAdapter(scheduler)
+        yt.start()
+    else:
+        try:
+            print("ข้าม YouTube: ไม่ได้ตั้งค่า YOUTUBE_STREAM_ID")
+        except Exception:
+            pass
+
+    # เริ่มบอท Discord หากมีโทเคน
+    if settings.DISCORD_BOT_TOKEN:
+        discord_adapter = DiscordAdapter(scheduler, llm, tts_engine, vts)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, discord_adapter.run)
+    else:
+        try:
+            print("ข้าม Discord: ไม่ได้ตั้งค่า DISCORD_BOT_TOKEN")
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())

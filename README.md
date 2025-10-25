@@ -86,14 +86,7 @@ python src/main.py
 
 ข้อความที่ถอดความจะถูกส่งเข้า `PriorityScheduler` และประมวลผลเหมือนข้อความแชทปกติ (ส่งต่อเข้า LLM, สร้าง TTS, ฯลฯ)
 
-## สร้างเสียงตัวอย่างและ RVC
-- สคริปต์: `scripts/generate_sample.py`
-- ผลลัพธ์:
-  - `output/sample_sawasdee_raw.wav` (ก่อน RVC)
-  - `output/sample_sawasdee.wav` (หลัง RVC ตามพรีเซ็ทใน `.env`)
-- ตั้งค่าที่เกี่ยวข้องใน `.env`:
-  - `TTS_ENGINE=f5_tts_thai` (ใช้เฉพาะ f5-tts-th)
-  - `ENABLE_RVC=true|false`
-  - `VOICE_PRESET=anime_girl|deep_male|narrator|neutral`
-  - `TTS_REFERENCE_WAV=<path_to_speaker_ref.wav>` (ถ้ามี)
-  - แนะนำ `F5_TTS_TIMEOUT_MS≈3000ms`, `RVC_TIMEOUT_MS=2000ms` ให้เป็นไปตามงบเวลา
+## หมายเหตุเกี่ยวกับ RVC
+- ฟีเจอร์ตัวอย่างเสียงและสคริปต์ทดสอบถูกถอดออกเพื่อความสะอาดของโปรเจกต์
+- โปรเจกต์ยังรองรับ RVC ผ่านการตั้งค่าใน `.env`: `ENABLE_RVC` และ `VOICE_PRESET`
+- การใช้งานจริงจะถูกเรียกผ่าน workflow หลักใน `src/main.py` เมื่อ TTS สร้างเสียงสำเร็จ
