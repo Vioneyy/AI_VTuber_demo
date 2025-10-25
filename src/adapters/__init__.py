@@ -1,0 +1,1 @@
+# Adapters: Discord, YouTube Live, TTS, VTS

@@ -1,0 +1,42 @@
+# =============== #
+#   Python files  #
+# =============== #
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =============== #
+#   Environments  #
+# =============== #
+.venv/
+venv/
+.env
+.env.*
+.DS_Store
+
+# =============== #
+#   Data / Models #
+# =============== #
+*.wav
+*.mp3
+*.flac
+*.mp4
+*.zip
+*.rar
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+
+# =============== #
+#   Logs / Output #
+# =============== #
+output/
+logs/
+*.log
+
+# =============== #
+#   Others        #
+# =============== #
+ref_audio/
