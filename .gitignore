@@ -39,3 +39,41 @@ logs/
 #   Others        #
 # =============== #
 ref_audio/
+ref_audio.wav
+
+# =============== #
+#   IDE / Editor  #
+# =============== #
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# =============== #
+#   OS Generated  #
+# =============== #
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =============== #
+#   Temporary     #
+# =============== #
+*.tmp
+*.temp
+test_*.py
+temp/
+tmp/
+
+# =============== #
+#   Secrets       #
+# =============== #
+*.key
+*.pem
+*.p12
+config.json
