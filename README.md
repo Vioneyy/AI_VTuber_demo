@@ -57,6 +57,8 @@ pip install -r requirements.txt
 - `VTS_PLUGIN_NAME` ชื่อปลั๊กอิน VTS
 - `VTS_PLUGIN_TOKEN` โทเคนสำหรับ VTS
 - `LLM_MODEL` ชื่อโมเดลที่ใช้
+- `LLM_TEMPERATURE` ความสุ่มของคำตอบ (แนะนำ 0.2–0.4 เพื่อให้กระชับ)
+- `LLM_MAX_TOKENS` จำกัดความยาวคำตอบ (แนะนำ 128 เพื่อความเร็ว)
 - `RESPONSE_TIMEOUT` ค่าเริ่มต้น 10 วินาที
 - `TTS_ENGINE` ตั้งค่าเป็น `f5_tts_thai` เพื่อใช้ F5-TTS-THAI
 - `TTS_REFERENCE_WAV` ไฟล์อ้างอิงเสียงผู้พูด (ช่วยกำหนดโทน)

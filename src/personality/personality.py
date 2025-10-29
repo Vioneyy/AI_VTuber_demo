@@ -1,36 +1,278 @@
+# src/personality/personality.py
 from __future__ import annotations
 import json
+import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 
-PERSONA_FILE = Path(__file__).with_name("persona.json")
+# import types defined earlier in src/core/types.py
+try:
+    from core.types import IncomingMessage, Response, Emotion, MessageSource
+except Exception:
+    # Fallback minimal stubs (in case core.types ยังไม่ถูกแก้หรือ import ผิด)
+    @dataclass
+    class IncomingMessage:
+        text: str
+        source: Any = None
+        author: Optional[str] = None
+        timestamp: Optional[float] = None
+        is_question: bool = False
+        priority: int = 0
+        meta: Optional[Dict[str, Any]] = None
 
-class Personality:
-    def __init__(self, data: Dict[str, Any]) -> None:
-        self.data = data
+    class Emotion:
+        NEUTRAL = "neutral"
+        HAPPY = "happy"
+        SAD = "sad"
+        ANGRY = "angry"
+        SURPRISED = "surprised"
+        SLEEPY = "sleepy"
+        CONFUSED = "confused"
+        EXCITED = "excited"
 
-    @classmethod
-    def load(cls) -> "Personality":
-        if PERSONA_FILE.exists():
-            data = json.loads(PERSONA_FILE.read_text(encoding="utf-8"))
-        else:
-            data = {
-                "name": "AI VTuber",
-                "style": "เป็นกันเอง ภาษาง่าย อนุญาตคำหยาบพอประมาณ",
-                "boundaries": [
-                    "ไม่เล่นมุกเหตุการณ์รุนแรงหรือประเด็นอ่อนไหว",
-                    "ไม่เปิดเผยรายละเอียดเทคนิค/การทำงานภายใน",
-                ],
-                "emotion_map": {
-                    "neutral": {"expression": "Neutral", "intensity": 0.5},
-                    "happy": {"expression": "Smile", "intensity": 0.8},
-                    "sad": {"expression": "Sad", "intensity": 0.6},
-                    "angry": {"expression": "Angry", "intensity": 0.7},
-                    "surprised": {"expression": "Surprised", "intensity": 0.9},
-                    "calm": {"expression": "Calm", "intensity": 0.6},
+    @dataclass
+    class Response:
+        text: str
+        emotion: str = Emotion.NEUTRAL
+        gestures: Optional[Dict[str, Any]] = None
+        meta: Optional[Dict[str, Any]] = None
+
+logger = logging.getLogger("PersonalityManager")
+if not logger.handlers:
+    # basic logging configuration if not setup by main app
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("[%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+
+class PersonalityManager:
+    """
+    จัดการ 'บุคลิก' ของ VTuber — โหลดบุคลิกจากไฟล์/พาราม หรือใช้ default
+    Interface ที่คาดหวังจาก main.py:
+      - PersonalityManager()  # สร้าง
+      - set_personality(name)
+      - get_personality(name)
+      - handle_message(incoming: IncomingMessage) -> Response
+      - generate_vts_commands(response: Response) -> List[Dict]   # (optional helper)
+    """
+
+    def __init__(self, personalities: Optional[Dict[str, Dict]] = None, default: str = "default"):
+        # รูปแบบ personalities:
+        # {
+        #   "default": {
+        #       "display_name": "Default",
+        #       "mood_map": {"happy": ["ขอบคุณ","ดีใจ"], ...},
+        #       "default_emotion": "neutral",
+        #       "gesture_map": {"happy": {"smile": 1.0}},
+        #       "meta": {...}
+        #    }, ...
+        # }
+        self.personalities: Dict[str, Dict] = personalities or {}
+        self.current: str = default
+        if not self.personalities:
+            self._load_builtin_personalities()
+        if self.current not in self.personalities:
+            self.current = next(iter(self.personalities.keys()))
+        logger.info(f"PersonalityManager initialized. current='{self.current}'")
+
+    def _load_builtin_personalities(self):
+        # บุคลิกพื้นฐาน — ปรับได้ตามต้องการ
+        self.personalities = {
+            "default": {
+                "display_name": "Default",
+                "default_emotion": Emotion.NEUTRAL,
+                "mood_map": {
+                    "happy": ["ขอบคุณ", "เยี่ยม", "ดีใจ", "สุดยอด", "love", "nice"],
+                    "sad": ["เสียใจ", "เศร้า", "เหงา"],
+                    "angry": ["โกรธ", "แค้น", "โมโห"],
+                    "surprised": ["ว้าว", "อะไรนะ", "จริงหรอ", "what"],
                 },
+                "gesture_map": {
+                    "happy": {"smile": 1.0, "eyes": "open"},
+                    "sad": {"head_down": 0.8},
+                    "angry": {"brow_down": 1.0},
+                    "surprised": {"eyes_wide": 1.0},
+                    "neutral": {"idle": 1.0},
+                },
+                "meta": {}
+            },
+            "gentle": {
+                "display_name": "Gentle",
+                "default_emotion": Emotion.NEUTRAL,
+                "mood_map": {
+                    "happy": ["ขอบคุณ", "ดีใจ", "น่ารัก"],
+                    "sad": ["เสียใจ", "เศร้า"],
+                    "surprised": ["ว้าว", "โอ้"],
+                },
+                "gesture_map": {
+                    "happy": {"smile": 0.8, "hand_wave": 0.3},
+                    "neutral": {"idle": 1.0}
+                },
+                "meta": {"tone": "soft"}
             }
-        return cls(data)
+        }
 
-    def get_emotion_config(self, emotion: str) -> Dict[str, Any]:
-        return self.data.get("emotion_map", {}).get(emotion, {"expression": "Neutral", "intensity": 0.5})
+    def load_personalities_from_file(self, path: str):
+        """
+        โหลด personalities จากไฟล์ JSON (รูปแบบเดียวกับ self.personalities)
+        """
+        p = Path(path)
+        if not p.exists():
+            logger.warning("Personality file not found: %s", path)
+            return False
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.personalities.update(data)
+                logger.info("Loaded personalities from %s", path)
+                return True
+            else:
+                logger.error("Personality file must contain a dict at top-level.")
+                return False
+        except Exception as e:
+            logger.exception("Failed to load personalities: %s", e)
+            return False
+
+    def list_personalities(self) -> List[str]:
+        return list(self.personalities.keys())
+
+    def get_personality(self, name: Optional[str] = None) -> Dict:
+        name = name or self.current
+        return self.personalities.get(name, {})
+
+    def set_personality(self, name: str) -> bool:
+        if name in self.personalities:
+            self.current = name
+            logger.info("Personality changed to '%s'", name)
+            return True
+        logger.error("Personality '%s' not found", name)
+        return False
+
+    def _detect_emotion_from_text(self, text: str, mood_map: Dict[str, List[str]]) -> str:
+        # heuristic: ค้นหาคีย์เวิร์ดใน mood_map
+        t = (text or "").lower()
+        for mood, keywords in mood_map.items():
+            for kw in keywords:
+                if kw.lower() in t:
+                    return mood
+        # punctuation/word heuristics
+        if "?" in text:
+            return "surprised"
+        return mood_map and "neutral" or "neutral"
+
+    def handle_message(self, incoming: IncomingMessage) -> Response:
+        """
+        รับ IncomingMessage แล้วคืน Response (text, emotion, gestures)
+        - ใช้ heuristic ง่าย ๆ เพื่อให้โมเดลขยับ/แสดงอารมณ์
+        - main.py สามารถเอา Response นี้แปลงเป็นคำสั่ง VTS ต่อได้
+        """
+        if incoming is None:
+            logger.warning("handle_message called with None")
+            return Response(text="", emotion=Emotion.NEUTRAL, gestures={})
+
+        personality = self.get_personality()
+        mood_map = personality.get("mood_map", {})
+        default_emotion = personality.get("default_emotion", Emotion.NEUTRAL)
+        gesture_map = personality.get("gesture_map", {})
+
+        text = incoming.text or ""
+        # ตรวจ is_question flag ด้วย
+        is_q = getattr(incoming, "is_question", False)
+        if not is_q and ("?" in text):
+            is_q = True
+
+        mood = self._detect_emotion_from_text(text, mood_map)
+        if not mood:
+            mood = default_emotion
+
+        # ตอบกลับแบบพื้นฐาน — main.py อาจ override หรือส่งข้อความผ่านโมดูล NLP/AI จริง ๆ
+        reply_text = self._build_reply_text(text, mood, is_q, personality)
+
+        gestures = gesture_map.get(mood, gesture_map.get("neutral", {}))
+
+        resp = Response(
+            text=reply_text,
+            emotion=getattr(Emotion, mood.upper(), mood) if hasattr(Emotion, mood.upper()) else mood,
+            gestures=gestures,
+            meta={"source": getattr(incoming, "source", None), "personality": self.current}
+        )
+        logger.debug("handle_message -> %s", resp)
+        return resp
+
+    def _build_reply_text(self, incoming_text: str, mood: str, is_question: bool, personality: Dict) -> str:
+        # แบบง่าย: ถ้าเป็นคำถาม ตอบกลับสั้น ๆ ถ้าไม่ใช่ ให้ยืนยัน/ขอบคุณ ฯลฯ
+        if is_question:
+            # ถ้าโค้ดหลักมี AI/LLM ให้เอา incoming_text ไปประมวลผลแทน
+            return "ขอตอบแป๊บนะ… (ยังไม่มีโมดูลตอบคำถาม)"  # placeholder
+        if mood == "happy":
+            return "ขอบคุณมากจ้า! ❤️"
+        if mood == "sad":
+            return "อุ๊ย เสียใจด้วยนะ…"
+        if mood == "angry":
+            return "อืม… เข้าใจแล้ว"
+        if mood == "surprised":
+            return "ว้าว!! จริงหรอ?"
+        return "รับทราบแล้วครับ/ค่ะ"
+
+    def generate_vts_commands(self, response: Response) -> List[Dict[str, Any]]:
+        """
+        แปลง Response เป็น list ของคำสั่งที่จะส่งไปยัง VTube Studio API
+        (รูปแบบนี้เป็นเพียงตัวอย่าง — ให้แก้ให้ตรงกับ API ของคุณ)
+        ตัวอย่างคำสั่ง:
+            {"type":"SetExpression","name":"smile","value":0.8}
+            {"type":"SetParameter","name":"MouthOpen","value":0.5}
+            {"type":"LoadCustomImage","layer":"face","path":"C:/..."}
+        """
+        cmds: List[Dict[str, Any]] = []
+        emotion = getattr(response, "emotion", None)
+        gestures = getattr(response, "gestures", {}) or {}
+
+        # แปลง emotion -> expression parameter (ตัวอย่าง)
+        if emotion:
+            # ถ้า emotion เป็น Enum (จาก core.types.Emotion) ให้ใช้ .value หรือ str()
+            em_val = getattr(emotion, "value", None) or str(emotion)
+            cmds.append({"type": "SetExpression", "name": "emotion", "value": em_val})
+
+        # แปลง gestures -> parameter updates
+        for gname, gval in gestures.items():
+            # ถ้า gval เป็น dict ซับซ้อน ให้ flatten ตามความเหมาะสม
+            if isinstance(gval, dict):
+                # ใส่แต่ชื่อ gesture เป็นตัวอย่าง
+                cmds.append({"type": "Gesture", "name": gname, "value": gval})
+            else:
+                cmds.append({"type": "SetParameter", "name": gname, "value": gval})
+
+        # placeholder: ให้ main app แปลคำสั่งเหล่านี้เป็น API calls จริง ๆ
+        logger.debug("Generated VTS commands: %s", cmds)
+        return cmds
+
+
+# ทำให้ import ถูกต้อง
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
+from pathlib import Path
+import json
+
+# Facade class เพื่อความเข้ากันได้กับอะแดปเตอร์เดิม (DiscordAdapter)
+# ที่คาดหวังให้มี Personality.load() และ .data สำหรับ persona.json
+@dataclass
+class Personality:
+    data: Dict[str, Any]
+
+    @staticmethod
+    def load(path: Optional[str] = None) -> "Personality":
+        try:
+            p = Path(path) if path else Path(__file__).resolve().parent / "persona.json"
+            if p.exists():
+                payload = json.loads(p.read_text(encoding="utf-8"))
+            else:
+                payload = {}
+        except Exception:
+            payload = {}
+        return Personality(data=payload)
+
+__all__ = ["PersonalityManager", "Personality"]

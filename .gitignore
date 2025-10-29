@@ -1,79 +1,28 @@
-# =============== #
-#   Python files  #
-# =============== #
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
 
-# =============== #
-#   Environments  #
-# =============== #
+# Virtual environments
 .venv/
 venv/
+env/
+
+# IDE/Editor
+.vscode/
+.idea/
+
+# Environment variables
 .env
-.DS_Store
 
-# =============== #
-#   Data / Models #
-# =============== #
-*.wav
-*.mp3
-*.flac
-*.mp4
-*.zip
-*.rar
-*.pt
-*.pth
-*.ckpt
-*.bin
-*.onnx
-
-# =============== #
-#   Logs / Output #
-# =============== #
+# Outputs & logs
 output/
 logs/
+
+# OS/Tooling
 *.log
-
-# =============== #
-#   Others        #
-# =============== #
-ref_audio/
-ref_audio.wav
-
-# =============== #
-#   IDE / Editor  #
-# =============== #
-.vscode/settings.json
-.idea/
-*.swp
-*.swo
-*~
-
-# =============== #
-#   OS Generated  #
-# =============== #
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# =============== #
-#   Temporary     #
-# =============== #
 *.tmp
-*.temp
-test_*.py
-temp/
-tmp/
-
-# =============== #
-#   Secrets       #
-# =============== #
-*.key
-*.pem
-*.p12
-config.json
+*.cache
+*.DS_Store

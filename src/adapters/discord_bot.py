@@ -2,6 +2,8 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 from pathlib import Path
+import os
+from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -259,6 +261,105 @@ class DiscordAdapter:
                 except Exception as e:
                     await ctx.send(f"TTS ล้มเหลว: {e}")
 
+        # ปรับความเร็ว TTS แบบ runtime
+        @self.bot.command(name="ttsspeed")
+        async def ttsspeed(ctx: commands.Context, value: float):
+            """ตั้งค่าความเร็ว TTS ชั่วคราว (เช่น 0.85 หรือ 1.1)
+            ใช้ทันทีสำหรับคำสั่งพูดใหม่ เช่น !say, !ask, !vtstest
+            """
+            try:
+                new_speed = float(value)
+                # กำหนดช่วงปลอดภัย 0.5–1.5 (ปรับได้ตามโมเดล)
+                if not (0.3 <= new_speed <= 2.0):
+                    await ctx.send("กรุณาใส่ค่าในช่วง 0.3–2.0")
+                    return
+                # อัปเดตใน settings และ environment เพื่อให้ส่วนอื่น ๆ มองเห็นทันที
+                self.settings.F5_TTS_SPEED = new_speed
+                os.environ["F5_TTS_SPEED"] = str(new_speed)
+                await ctx.send(f"✅ ตั้งความเร็ว TTS เป็น {new_speed:.2f} (runtime)")
+            except Exception as e:
+                await ctx.send(f"ตั้งค่าความเร็วไม่สำเร็จ: {e}")
+
+        # บันทึกความเร็ว TTS ลง .env เพื่อให้ถาวร
+        @self.bot.command(name="ttsspeedsave")
+        async def ttsspeedsave(ctx: commands.Context, value: float):
+            """ตั้งและบันทึกความเร็ว TTS เป็นค่าถาวรใน .env (เช่น 0.85)"""
+            try:
+                new_speed = float(value)
+                if not (0.3 <= new_speed <= 2.0):
+                    await ctx.send("กรุณาใส่ค่าในช่วง 0.3–2.0")
+                    return
+                # อัปเดต runtime ด้วย
+                self.settings.F5_TTS_SPEED = new_speed
+                os.environ["F5_TTS_SPEED"] = str(new_speed)
+                ok = self._persist_env_value("F5_TTS_SPEED", str(new_speed))
+                if ok:
+                    await ctx.send(f"💾 บันทึกความเร็ว TTS ถาวร: {new_speed:.2f} ใน .env แล้ว")
+                else:
+                    await ctx.send("บันทึก .env ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ไฟล์หรือพาธ")
+            except Exception as e:
+                await ctx.send(f"ตั้งค่าความเร็วถาวรไม่สำเร็จ: {e}")
+
+        # เปิด/ปิดการใช้เสียง/ข้อความอ้างอิงของ F5-TTS (runtime)
+        @self.bot.command(name="ttsref")
+        async def ttsref(ctx: commands.Context, mode: str):
+            """เปิด/ปิดการใช้เสียงอ้างอิงใน TTS: ใช้ 'on' หรือ 'off'"""
+            try:
+                m = mode.strip().lower()
+                if m not in ("on", "off"):
+                    await ctx.send("โหมดไม่ถูกต้อง ใช้ 'on' หรือ 'off'")
+                    return
+                use_ref = (m == "on")
+                self.settings.F5_TTS_USE_REFERENCE = use_ref
+                os.environ["F5_TTS_USE_REFERENCE"] = "true" if use_ref else "false"
+                await ctx.send(f"✅ ใช้อ้างอิง TTS: {'เปิด' if use_ref else 'ปิด'} (runtime)")
+            except Exception as e:
+                await ctx.send(f"ตั้งค่าไม่สำเร็จ: {e}")
+
+        # บันทึกสถานะใช้เสียง/ข้อความอ้างอิง TTS ลง .env (ถาวร)
+        @self.bot.command(name="ttsrefsave")
+        async def ttsrefsave(ctx: commands.Context, mode: str):
+            """บันทึกสถานะอ้างอิง TTS ลง .env เป็นค่าถาวร: 'on' หรือ 'off'"""
+            try:
+                m = mode.strip().lower()
+                if m not in ("on", "off"):
+                    await ctx.send("โหมดไม่ถูกต้อง ใช้ 'on' หรือ 'off'")
+                    return
+                use_ref = (m == "on")
+                self.settings.F5_TTS_USE_REFERENCE = use_ref
+                os.environ["F5_TTS_USE_REFERENCE"] = "true" if use_ref else "false"
+                ok = self._persist_env_value("F5_TTS_USE_REFERENCE", "true" if use_ref else "false")
+                if ok:
+                    await ctx.send(f"💾 บันทึกอ้างอิง TTS ถาวร: {'on' if use_ref else 'off'} ใน .env แล้ว")
+                else:
+                    await ctx.send("บันทึก .env ไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ไฟล์หรือพาธ")
+            except Exception as e:
+                await ctx.send(f"ตั้งค่าถาวรไม่สำเร็จ: {e}")
+
+        @self.bot.command(name="playref")
+        async def playref(ctx: commands.Context):
+            """เล่นไฟล์ตัวอย่าง ref_audio.wav และลิปซิงก์ไปยัง VTS (ทดสอบปากขยับ)"""
+            from pathlib import Path
+            # ค้นหาไฟล์จากรากโปรเจกต์
+            proj_root = Path(__file__).parent.parent.parent
+            wav_path = proj_root / "ref_audio.wav"
+            if not wav_path.exists():
+                await ctx.send("ไม่พบ ref_audio.wav ในรากโปรเจกต์")
+                return
+            # เล่นในช่องเสียง และเรียกลิปซิงก์พร้อมกัน
+            try:
+                await self._play_in_voice(ctx, str(wav_path))
+                vts = getattr(self, "vts_client", None)
+                if vts:
+                    try:
+                        await vts.lipsync_wav(str(wav_path))
+                    except Exception:
+                        await ctx.send("⚠️ เล่นเสียงสำเร็จ แต่ลิปซิงก์กับ VTS ล้มเหลว")
+                        return
+                await ctx.send("▶️ กำลังเล่น ref_audio.wav และลิปซิงก์กับ VTS")
+            except Exception as e:
+                await ctx.send(f"เล่นไฟล์ล้มเหลว: {e}")
+
         @self.bot.command(name="emotion")
         async def emotion(ctx: commands.Context, emotion_type: str):
             """ทริกเกอร์อีโมทแบบ manual
@@ -326,6 +427,94 @@ class DiscordAdapter:
                 except Exception as e:
                     await ctx.send(f"ล้มเหลว: {e}")
 
+        @self.bot.command(name="vtsstatus")
+        async def vtsstatus(ctx: commands.Context):
+            """แสดงสถานะการเชื่อมต่อ VTS และการแมปพารามิเตอร์"""
+            vts = getattr(self, "vts_client", None)
+            if not vts:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+            try:
+                status = vts.get_status()
+                mapped = status.get("mapped", {})
+                lines = [
+                    f"เชื่อมต่อ: {'✅' if status.get('connected') else '❌'}",
+                    f"Host: {status.get('host')} Port: {status.get('port')}",
+                    "การแมปพารามิเตอร์:",
+                ]
+                for k, v in mapped.items():
+                    lines.append(f"- {k} -> {v or 'N/A'}")
+                await ctx.send("\n".join(lines))
+            except Exception as e:
+                await ctx.send(f"อ่านสถานะ VTS ล้มเหลว: {e}")
+
+        @self.bot.command(name="vtsmouth")
+        async def vtsmouth(ctx: commands.Context, value: float):
+            """ตั้งค่า MouthOpen ของโมเดลโดยตรง (0.0..1.0) เพื่อทดสอบการ inject"""
+            vts = getattr(self, "vts_client", None)
+            if not vts:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+            try:
+                mouth_id = vts.ctrl.param_map.get("MouthOpen")
+            except Exception:
+                mouth_id = None
+            if not mouth_id:
+                await ctx.send("ไม่พบการแมปพารามิเตอร์ MouthOpen ในโมเดล (N/A)")
+                return
+            try:
+                val = max(0.0, min(1.0, float(value)))
+                await vts.ctrl.set_parameters({mouth_id: val}, weight=1.0)
+                await ctx.send(f"ตั้งค่า MouthOpen เป็น {val:.2f} สำเร็จ")
+            except Exception as e:
+                await ctx.send(f"ตั้งค่า MouthOpen ล้มเหลว: {e}")
+
+        @self.bot.command(name="vtsreconnect")
+        async def vtsreconnect(ctx: commands.Context):
+            """สั่งให้เชื่อมต่อ VTS ใหม่ (WS reconnect)"""
+            vts = getattr(self, "vts_client", None)
+            if not vts:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+            try:
+                ok = await vts.reconnect()
+                await ctx.send("✅ เชื่อมต่อใหม่สำเร็จ" if ok else "❌ เชื่อมต่อใหม่ไม่สำเร็จ")
+            except Exception as e:
+                await ctx.send(f"เชื่อมต่อใหม่ล้มเหลว: {e}")
+
+        @self.bot.command(name="vtstest")
+        async def vtstest(ctx: commands.Context, *, text: str):
+            """ทดสอบเชื่อม VTS: สร้างเสียงด้วย TTS และลิปซิงก์พร้อมกัน"""
+            if not self.tts_engine:
+                await ctx.send("TTS engine ไม่พร้อมใช้งาน")
+                return
+            vts = getattr(self, "vts_client", None)
+            if not vts:
+                await ctx.send("VTS client ไม่พร้อมใช้งาน")
+                return
+            try:
+                async with ctx.typing():
+                    audio = self.tts_engine.speak(
+                        text,
+                        voice_id=self.settings.TTS_VOICE_ID,
+                        emotion="neutral",
+                        prosody={"rate": float(self.settings.F5_TTS_SPEED)},
+                    )
+                if not audio:
+                    await ctx.send("สร้างเสียงไม่สำเร็จ")
+                    return
+                # เล่นเสียงในช่องเสียง
+                await self._play_in_voice_bytes(ctx, audio)
+                # ลิปซิงก์พร้อมกัน
+                try:
+                    await vts.lipsync_bytes(audio)
+                except Exception:
+                    await ctx.send("ลิปซิงก์กับ VTS ล้มเหลว")
+                else:
+                    await ctx.send("✅ ทดสอบลิปซิงก์สำเร็จ")
+            except Exception as e:
+                await ctx.send(f"vtstest ล้มเหลว: {e}")
+
     def _load_system_prompt(self) -> str:
         # โหลด system prompt เดียวกับ main.py
         try:
@@ -363,6 +552,7 @@ class DiscordAdapter:
     async def _play_in_voice_bytes(self, ctx: commands.Context, wav_bytes: bytes):
         """เล่น WAV bytes ในช่องเสียงโดยไม่ต้องบันทึกไฟล์ ด้วย ffmpeg pipe"""
         import shutil as _shutil
+        import io as _io
         ffmpeg = _shutil.which("ffmpeg")
         if not ffmpeg:
             await ctx.send("ไม่พบ ffmpeg ใน PATH จึงไม่สามารถเล่นเสียงในช่องได้")
@@ -375,30 +565,11 @@ class DiscordAdapter:
         vc: discord.VoiceClient = ctx.voice_client  # type: ignore
         if vc.is_playing():
             vc.stop()
-        # ใช้ ffmpeg อ่านจาก stdin แก่วะ แปลงเป็น PCM ให้ Discord
-        source = discord.FFmpegPCMAudio(source='pipe:0', executable=ffmpeg, pipe=True)
+        # ป้อน WAV bytes ผ่าน stdin โดยใช้ BytesIO เพื่อหลีกเลี่ยง parameter conflict
+        buf = _io.BytesIO(wav_bytes)
+        # ระบุ before_options ให้ ffmpeg เข้าใจอินพุตเป็น WAV จาก stdin
+        source = discord.FFmpegPCMAudio(source=buf, executable=ffmpeg, pipe=True, before_options='-f wav')
         vc.play(source)
-        # เขียน bytes ลง stdin ของ ffmpeg ใน thread เพื่อไม่บล็อก
-        def _writer():
-            try:
-                if source._process and source._process.stdin:
-                    source._process.stdin.write(wav_bytes)
-                    try:
-                        source._process.stdin.flush()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            finally:
-                try:
-                    if source._process and source._process.stdin:
-                        source._process.stdin.close()
-                except Exception:
-                    pass
-        try:
-            await asyncio.to_thread(_writer)
-        except Exception:
-            pass
         # ลิปซิงก์พร้อมกันหากมี VTS client
         try:
             vts_client = getattr(self, "vts_client", None)
@@ -413,3 +584,27 @@ class DiscordAdapter:
             print("DISCORD_BOT_TOKEN ไม่ถูกตั้งค่าใน .env")
             return
         self.bot.run(token)
+
+    # ยูทิลิตี้: บันทึกค่า key=value ลงไฟล์ .env ที่รากโปรเจค
+    def _persist_env_value(self, key: str, value: str) -> bool:
+        try:
+            env_path = Path(__file__).parent.parent.parent / ".env"
+            # ถ้าไม่มีไฟล์ ให้สร้างใหม่
+            if not env_path.exists():
+                env_path.write_text(f"{key}={value}\n", encoding="utf-8")
+                return True
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            found = False
+            new_lines = []
+            for line in lines:
+                if line.strip().startswith(f"{key}="):
+                    new_lines.append(f"{key}={value}")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                new_lines.append(f"{key}={value}")
+            env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            return True
+        except Exception:
+            return False

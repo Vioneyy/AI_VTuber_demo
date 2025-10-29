@@ -118,17 +118,48 @@ class F5TTSThaiEngine(TTSEngine):
 
         ref_wav_path = self.settings.TTS_REFERENCE_WAV
         ref_text = getattr(self.settings, "F5_TTS_REF_TEXT", "")  # ว่างจะใช้ ASR (ต้องใช้ทรัพยากรเพิ่ม)
+        use_reference = bool(getattr(self.settings, "F5_TTS_USE_REFERENCE", True))
 
         speaker_wav = None
-        if ref_wav_path:
+        if ref_wav_path and use_reference:
             p = Path(ref_wav_path)
             if p.exists():
                 speaker_wav = str(p)
 
+        def _ensure_silent_ref_wav(seconds: float = 0.3, sample_rate: int = sr) -> str:
+            """สร้างไฟล์ WAV เงียบชั่วคราว เพื่อใช้เป็น ref_audio เมื่อปิด reference
+            บางไลบรารีต้องการพารามิเตอร์แบบบังคับ (positional) จึงใส่ไฟล์ที่ถูกต้องเข้าไปเสมอ
+            """
+            try:
+                out_dir = Path(os.getenv("OUTPUT_DIR", "output"))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / f"silent_ref_{sample_rate}_{int(seconds*1000)}ms.wav"
+                if not path.exists():
+                    n = int(seconds * sample_rate)
+                    pcm = np.zeros(n, dtype=np.int16)
+                    with wave.open(str(path), 'wb') as w:
+                        w.setnchannels(1)
+                        w.setsampwidth(2)
+                        w.setframerate(sample_rate)
+                        w.writeframes(pcm.tobytes())
+                return str(path)
+            except Exception:
+                # fallback: ใช้ไฟล์อ้างอิงเดิมถ้ามี หรือคืนค่าเป็นไฟล์ใน output ที่สร้างไม่สำเร็จ (จะให้ lib จัดการเอาเอง)
+                return str(Path(ref_wav_path)) if ref_wav_path else str(Path("output/silent_ref.wav"))
+
         try:
+            # ไลบรารี F5-TTS-Thai ต้องการ ref_audio/ref_text เป็นพารามิเตอร์บังคับ
+            # เมื่อปิด reference ให้ส่งไฟล์เงียบและ ref_text ว่าง เพื่อไม่ให้มีข้อความอ้างอิงติดมา
+            if use_reference and speaker_wav:
+                ref_audio_arg = speaker_wav
+                ref_text_arg = ref_text
+            else:
+                ref_audio_arg = _ensure_silent_ref_wav(sample_rate=sr)
+                ref_text_arg = ""
+
             wav = self.tts.infer(
-                ref_audio=speaker_wav if speaker_wav else None,
-                ref_text=ref_text,
+                ref_audio=ref_audio_arg,
+                ref_text=ref_text_arg,
                 gen_text=text,
                 step=step,
                 cfg=cfg,
