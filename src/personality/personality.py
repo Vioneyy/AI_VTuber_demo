@@ -251,28 +251,53 @@ class PersonalityManager:
         return cmds
 
 
-# ทำให้ import ถูกต้อง
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
-from pathlib import Path
-import json
-
-# Facade class เพื่อความเข้ากันได้กับอะแดปเตอร์เดิม (DiscordAdapter)
-# ที่คาดหวังให้มี Personality.load() และ .data สำหรับ persona.json
+# ปรับให้โหลด persona จาก persona.py เป็นค่าเริ่มต้น และรองรับ JSON ถ้าระบุ path
 @dataclass
 class Personality:
     data: Dict[str, Any]
 
     @staticmethod
-    def load(path: Optional[str] = None) -> "Personality":
-        try:
-            p = Path(path) if path else Path(__file__).resolve().parent / "persona.json"
-            if p.exists():
-                payload = json.loads(p.read_text(encoding="utf-8"))
-            else:
+    def load(persona_name: Optional[str] = "miko", path: Optional[str] = None) -> "Personality":
+        """
+        โหลดข้อมูล persona ในรูปแบบ dict เพื่อความเข้ากันได้กับโค้ดเดิม
+        ลำดับความสำคัญ:
+        1) ถ้าให้ path เป็นไฟล์ .json และมีอยู่จริง จะอ่านจาก JSON นั้น
+        2) ไม่เช่นนั้น จะโหลดจากโมดูล persona.py โดยใช้ชื่อ persona ที่ระบุ (default: "miko")
+        """
+        payload: Dict[str, Any] = {}
+
+        # 1) explicit JSON path
+        if path:
+            try:
+                p = Path(path)
+                if p.exists() and p.suffix.lower() == ".json":
+                    payload = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
                 payload = {}
-        except Exception:
-            payload = {}
+
+        # 2) fallback to persona.py
+        if not payload:
+            try:
+                # import แบบ lazy เพื่อหลีกเลี่ยงปัญหาแพ็กเกจระหว่างรันแบบสคริปต์
+                from .persona import get_persona, get_available_personas  # type: ignore
+            except Exception:
+                try:
+                    # เผื่อกรณีถูกเรียกโดยอิมพอร์ตแบบ absolute
+                    from personality.persona import get_persona, get_available_personas  # type: ignore
+                except Exception:
+                    get_persona = None  # type: ignore
+                    get_available_personas = lambda: []  # type: ignore
+
+            try:
+                style_text = (get_persona(persona_name or "miko") if get_persona else "")
+                payload = {
+                    "name": (persona_name or "miko"),
+                    "style": style_text,
+                    "available": (get_available_personas() if callable(get_available_personas) else []),
+                }
+            except Exception:
+                payload = {"name": (persona_name or "miko"), "style": ""}
+
         return Personality(data=payload)
 
 __all__ = ["PersonalityManager", "Personality"]
