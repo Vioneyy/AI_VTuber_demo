@@ -1,12 +1,11 @@
-pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu118
-pydantic
-pydantic-settings
+websockets
 python-dotenv
 openai
-websockets
-pytchat
 discord.py
 PyNaCl
+pytchat
 numpy
 f5-tts-th
+huggingface_hub
 keyboard
+noise

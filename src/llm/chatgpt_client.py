@@ -28,15 +28,33 @@ class ChatGPTClient:
             return Emotion.SURPRISED
         return Emotion.NEUTRAL
 
-    def generate_reply(self, user_text: str, system_prompt: str, persona: Dict[str, Any]) -> Response:
+    def generate_reply(self, user_text: str, system_prompt: str, persona: Dict[str, Any] | None = None) -> Response:
         # หากไม่มี client หรือไม่ได้ตั้งค่า ให้ตอบแบบสั้นด้วยโทนมาตรฐานเป็นสคาฟโฟลด์
         if not self.client or not self.settings.LLM_MODEL:
             txt = f"รับทราบ: {user_text.strip()}"
             return Response(text=txt, emotion=self._pick_emotion(txt), gestures={"hint": "scaffold"})
 
         # ใช้รูปแบบข้อความเฉพาะที่เหมาะกับงานนี้
+        sys_content = system_prompt
+        # แนบ persona หากมี เพื่อปรับบริบทการตอบโดยไม่บังคับ
+        try:
+            if persona:
+                style = str(persona.get("style", "")).strip()
+                boundaries = persona.get("boundaries", []) or []
+                if style:
+                    sys_content += f"\nสไตล์การพูด: {style}"
+                if boundaries:
+                    try:
+                        btxt = "; ".join([str(b) for b in boundaries])
+                        sys_content += f"\nข้อจำกัด: {btxt}"
+                    except Exception:
+                        pass
+        except Exception:
+            # ไม่ให้ persona ทำให้รันพัง หากโครงสร้างไม่ตรง ให้ข้ามไป
+            pass
+
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": sys_content},
             {"role": "user", "content": user_text},
         ]
 
@@ -44,8 +62,8 @@ class ChatGPTClient:
         comp = self.client.chat.completions.create(
             model=self.settings.LLM_MODEL,
             messages=messages,
-            temperature=0.7,
-            max_tokens=256,
+            temperature=float(getattr(self.settings, "LLM_TEMPERATURE", 0.3)),
+            max_tokens=int(getattr(self.settings, "LLM_MAX_TOKENS", 128)),
         )
         txt = comp.choices[0].message.content if comp and comp.choices else ""
         return Response(text=txt, emotion=self._pick_emotion(txt), gestures={"from": "llm"})

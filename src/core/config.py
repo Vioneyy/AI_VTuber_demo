@@ -20,6 +20,9 @@ class Config:
     # === OpenAI / LLM ===
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    # ปรับความกระชับ/ความเร็วของคำตอบ
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+    LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "128"))
     
     # === VTube Studio ===
     VTS_PLUGIN_NAME = os.getenv("VTS_PLUGIN_NAME", "AI_VTuber")
@@ -37,6 +40,54 @@ class Config:
     VTS_MOTION_MIN_INTERVAL = float(os.getenv("VTS_MOTION_MIN_INTERVAL", "2.0"))
     VTS_MOTION_MAX_INTERVAL = float(os.getenv("VTS_MOTION_MAX_INTERVAL", "5.0"))
     VTS_BLINK_DURATION = float(os.getenv("VTS_BLINK_DURATION", "0.15"))
+    # โหมดสไตล์และพรีเซ็ตสำหรับการขยับให้ดูเป็นมนุษย์มากขึ้น
+    VTS_NEURO_STYLE = os.getenv("VTS_NEURO_STYLE", "0").lower() in ("1", "true", "yes")
+    VTS_USE_TIMELINE_STYLE = os.getenv("VTS_USE_TIMELINE_STYLE", "1").lower() in ("1", "true", "yes")
+    # ปรับจูนพฤติกรรม idle ให้คล้ายมนุษย์: ความถี่การส่ายหัวตามแกนต่าง ๆ (Hz)
+    VTS_IDLE_YAW_FREQ_HZ = float(os.getenv("VTS_IDLE_YAW_FREQ_HZ", "0.055"))
+    VTS_IDLE_PITCH_FREQ_HZ = float(os.getenv("VTS_IDLE_PITCH_FREQ_HZ", "0.045"))
+    VTS_IDLE_ROLL_FREQ_HZ = float(os.getenv("VTS_IDLE_ROLL_FREQ_HZ", "0.065"))
+    # เวลา look-away ขั้นต่ำ/ขั้นสูงสุด (วินาที)
+    VTS_LOOK_AWAY_MIN_INTERVAL = float(os.getenv("VTS_LOOK_AWAY_MIN_INTERVAL", "13.0"))
+    VTS_LOOK_AWAY_MAX_INTERVAL = float(os.getenv("VTS_LOOK_AWAY_MAX_INTERVAL", "17.0"))
+    # โอกาสทำ blink เป็นคลัสเตอร์, โอกาส pulse รอยยิ้ม, และเปิด nod ตอนพูด
+    VTS_BLINK_CLUSTER_PROB = float(os.getenv("VTS_BLINK_CLUSTER_PROB", "0.35"))
+    VTS_SMILE_PULSE_PROB = float(os.getenv("VTS_SMILE_PULSE_PROB", "0.60"))
+    VTS_NOD_ON_TALK = os.getenv("VTS_NOD_ON_TALK", "1").lower() in ("1", "true", "yes")
+
+    # การลดอาการสั่น/สั่นไหวและทำให้การขยับนุ่มขึ้น (ค่าเริ่มต้นเน้นนิ่งขึ้น)
+    VTS_SMOOTHING_ALPHA = float(os.getenv("VTS_SMOOTHING_ALPHA", "0.12"))  # 0..1, ยิ่งต่ำยิ่งนุ่ม
+    VTS_DISABLE_NOISE = os.getenv("VTS_DISABLE_NOISE", "1").lower() in ("1", "true", "yes")
+    VTS_NOISE_HEAD_SCALE = float(os.getenv("VTS_NOISE_HEAD_SCALE", "0.00"))
+    VTS_NOISE_HEAD_Z_SCALE = float(os.getenv("VTS_NOISE_HEAD_Z_SCALE", "0.00"))
+    VTS_NOISE_BODY_X_SCALE = float(os.getenv("VTS_NOISE_BODY_X_SCALE", "0.00"))
+    VTS_NOISE_BODY_Z_SCALE = float(os.getenv("VTS_NOISE_BODY_Z_SCALE", "0.00"))
+    VTS_IDLE_JITTER_X = float(os.getenv("VTS_IDLE_JITTER_X", "0.00"))
+    VTS_IDLE_JITTER_Y = float(os.getenv("VTS_IDLE_JITTER_Y", "0.00"))
+    VTS_MICROSACCADE_PROB = float(os.getenv("VTS_MICROSACCADE_PROB", "0.005"))
+    # ตัวเลือกสำหรับการดีบัก/ปิด motion ชั่วคราว
+    VTS_DISABLE_ALL_MOTION = os.getenv("VTS_DISABLE_ALL_MOTION", "0").lower() in ("1", "true", "yes")
+    VTS_ENABLE_RANDOM_MOTION = os.getenv("VTS_ENABLE_RANDOM_MOTION", "1").lower() in ("1", "true", "yes")
+    # บันทึกข้อมูลการ inject เป็น CSV เพื่อวิเคราะห์ jitter
+    VTS_DUMP_CSV = os.getenv("VTS_DUMP_CSV", "0").lower() in ("1", "true", "yes")
+    VTS_DUMP_CSV_PATH = os.getenv("VTS_DUMP_CSV_PATH", str((Path(__file__).parent.parent.parent / "logs" / "vts_motion_dump.csv")))
+    # โหมดสคริปต์ (เล่นพรีเซ็ต Neuro แบบไม่ใช้ motion loop)
+    VTS_SCRIPTED_PRESET = os.getenv("VTS_SCRIPTED_PRESET", "0").lower() in ("1", "true", "yes")
+    # โหมดสุ่มเหตุการณ์ (ไม่ใช้ลูปอัปเดตต่อเนื่อง): สุ่ม tilt/look/nod/smile/half‑lid
+    VTS_RANDOM_EVENTS_PRESET = os.getenv("VTS_RANDOM_EVENTS_PRESET", "0").lower() in ("1", "true", "yes")
+    # โหมดสุ่มเหตุการณ์แบบต่อเนื่อง (ไม่มีเวลาจำกัด จนกว่าจะสั่งหยุด)
+    VTS_RANDOM_EVENTS_CONTINUOUS = os.getenv("VTS_RANDOM_EVENTS_CONTINUOUS", "0").lower() in ("1", "true", "yes")
+    # ระยะเวลาเล่นพรีเซ็ต (วินาที) สำหรับทั้งโหมดสคริปต์และสุ่มเหตุการณ์
+    VTS_PRESET_DURATION_SEC = float(os.getenv("VTS_PRESET_DURATION_SEC", "0.0"))
+    # โปรไฟล์สไตล์และวิดีโออ้างอิง (ใช้ปรับ motion ให้เป็นธรรมชาติ)
+    VTS_STYLE_PROFILE_NAME = os.getenv("VTS_STYLE_PROFILE_NAME", "neuro_like")
+    VTS_STYLE_PROFILE_FILE = os.getenv(
+        "VTS_STYLE_PROFILE_FILE",
+        str((Path(__file__).parent.parent / "adapters" / "vts" / "styles" / "neuro_like.json").resolve())
+    )
+    # ระบุไฟล์วิดีโออ้างอิงแบบ comma-separated path
+    _style_ref_videos_raw = os.getenv("VTS_STYLE_REF_VIDEOS", "")
+    VTS_STYLE_REF_VIDEOS = [p.strip() for p in _style_ref_videos_raw.split(",") if p.strip()]
     
     # Safe Motion Mode
     SAFE_MOTION_MODE = os.getenv("SAFE_MOTION_MODE", "false").lower() == "true"
@@ -44,6 +95,7 @@ class Config:
     
     # VTS Hotkey Settings (สำหรับ Hiyori_A - มีแค่ 3 hotkeys)
     ENABLE_GLOBAL_HOTKEYS = os.getenv("ENABLE_GLOBAL_HOTKEYS", "false").lower() == "true"
+    VTS_HK_NEUTRAL = os.getenv("VTS_HK_NEUTRAL", "thinking")
     VTS_HK_THINKING = os.getenv("VTS_HK_THINKING", "thinking")
     VTS_HK_HAPPY = os.getenv("VTS_HK_HAPPY", "happy")
     VTS_HK_SAD = os.getenv("VTS_HK_SAD", "sad")
@@ -59,6 +111,15 @@ class Config:
     TTS_ENGINE = os.getenv("TTS_ENGINE", "f5_tts_thai")
     TTS_REFERENCE_WAV = os.getenv("TTS_REFERENCE_WAV", "")
     TTS_REFERENCE_TEXT = os.getenv("TTS_REFERENCE_TEXT", "สวัสดีค่ะ ฉันเป็น AI VTuber")
+    # เสียงและความเร็วสำหรับ TTS
+    TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "default")
+    F5_TTS_SPEED = float(os.getenv("F5_TTS_SPEED", "1.0"))
+    # ควบคุมการใช้เสียง/ข้อความอ้างอิงสำหรับ F5-TTS-Thai
+    # หากปิด (false) จะไม่ส่ง ref_audio/ref_text เข้าโมเดล เพื่อหลีกเลี่ยงการพูด ref_text ติดมาด้วย
+    F5_TTS_USE_REFERENCE = os.getenv("F5_TTS_USE_REFERENCE", "false").lower() in ("1", "true", "yes")
+    # ข้อความอ้างอิงสำหรับการจัดวางเสียง (ถ้าเว้นว่าง บางโมเดลจะใช้ ASR กับ ref_audio)
+    # รองรับทั้งชื่อคีย์ใหม่และถอยหลังเข้ากันกับ TTS_REFERENCE_TEXT
+    F5_TTS_REF_TEXT = os.getenv("F5_TTS_REF_TEXT", "")
     
     # === RVC ===
     ENABLE_RVC = os.getenv("ENABLE_RVC", "false").lower() == "true"
@@ -91,8 +152,10 @@ class Config:
             errors.append("⚠️ ไม่มี DISCORD_BOT_TOKEN หรือ YOUTUBE_STREAM_ID - ระบบจะไม่สามารถรับข้อความได้")
         
         if self.TTS_ENGINE == "f5_tts_thai":
-            if not self.TTS_REFERENCE_WAV or not os.path.exists(self.TTS_REFERENCE_WAV):
-                errors.append("⚠️ TTS_REFERENCE_WAV ไม่ได้ตั้งค่าหรือไฟล์ไม่มีอยู่")
+            # บังคับตรวจไฟล์อ้างอิงเฉพาะกรณีเปิดใช้ reference เท่านั้น
+            if self.F5_TTS_USE_REFERENCE:
+                if not self.TTS_REFERENCE_WAV or not os.path.exists(self.TTS_REFERENCE_WAV):
+                    errors.append("⚠️ TTS_REFERENCE_WAV ไม่ได้ตั้งค่าหรือไฟล์ไม่มีอยู่ (เปิดใช้ reference)")
         
         if errors:
             print("\n" + "="*60)
