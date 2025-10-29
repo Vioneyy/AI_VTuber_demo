@@ -553,6 +553,7 @@ class DiscordAdapter:
         """เล่น WAV bytes ในช่องเสียงโดยไม่ต้องบันทึกไฟล์ ด้วย ffmpeg pipe"""
         import shutil as _shutil
         import io as _io
+        from pathlib import Path as _Path
         ffmpeg = _shutil.which("ffmpeg")
         if not ffmpeg:
             await ctx.send("ไม่พบ ffmpeg ใน PATH จึงไม่สามารถเล่นเสียงในช่องได้")
@@ -567,9 +568,23 @@ class DiscordAdapter:
             vc.stop()
         # ป้อน WAV bytes ผ่าน stdin โดยใช้ BytesIO เพื่อหลีกเลี่ยง parameter conflict
         buf = _io.BytesIO(wav_bytes)
-        # ระบุ before_options ให้ ffmpeg เข้าใจอินพุตเป็น WAV จาก stdin
-        source = discord.FFmpegPCMAudio(source=buf, executable=ffmpeg, pipe=True, before_options='-f wav')
-        vc.play(source)
+        try:
+            # ระบุ before_options ให้ ffmpeg เข้าใจอินพุตเป็น WAV จาก stdin
+            source = discord.FFmpegPCMAudio(source=buf, executable=ffmpeg, pipe=True, before_options='-f wav')
+            vc.play(source)
+        except Exception as e:
+            # บางระบบ ffmpeg pipe อาจล้มเหลว: ตกลงเป็นการเขียนไฟล์ชั่วคราวแล้วเล่นจากไฟล์
+            try:
+                out_dir = _Path("output")
+                out_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = out_dir / "tts_tmp.wav"
+                tmp_path.write_bytes(wav_bytes)
+                await ctx.send("⚠️ ffmpeg pipe ล้มเหลว กำลังลองเล่นจากไฟล์ชั่วคราว")
+                await self._play_in_voice(ctx, str(tmp_path))
+                return
+            except Exception:
+                await ctx.send(f"เล่นเสียงล้มเหลว: {e}")
+                return
         # ลิปซิงก์พร้อมกันหากมี VTS client
         try:
             vts_client = getattr(self, "vts_client", None)
