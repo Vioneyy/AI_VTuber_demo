@@ -33,6 +33,11 @@ class VTSClient:
         self._mouth_id: Optional[str] = None
         self._smile_id: Optional[str] = None
         self._motion_task: Optional[asyncio.Task] = None
+        # Expose ws for compatibility
+        self.ws = None
+        # Optional compatibility fields
+        self.available_parameters = []
+        self.available_hotkeys = []
 
     async def connect(self):
         await self.ctrl.connect()
@@ -44,6 +49,8 @@ class VTSClient:
         self._smile_id = self.ctrl.param_map.get("MouthSmile")
         # ใช้แหล่ง amplitude จากลิปซิงก์ ไม่ใช้ไมค์
         self.ctrl.enable_mic = False
+        # Mirror ws for external checks
+        self.ws = self.ctrl.ws
         # คืนค่า True เพื่อรองรับสคริปต์ที่ตรวจผลลัพธ์การเชื่อมต่อ
         return True
 
@@ -59,6 +66,7 @@ class VTSClient:
                 self._motion_task.cancel()
         finally:
             self._motion_task = None
+        self.ws = None
 
     async def reconnect(self):
         """Disconnect then connect + authenticate again. Returns True if OK."""
@@ -77,6 +85,19 @@ class VTSClient:
             "port": self.ctrl.port,
             "mapped": dict(self.ctrl.param_map),
         }
+
+    async def inject_parameter(self, name: str, value: float):
+        """Compatibility method used by MotionController to inject single parameter."""
+        try:
+            await self.ctrl.set_parameters({name: float(value)}, weight=1.0)
+        except Exception:
+            pass
+
+    async def trigger_hotkey(self, name: str):
+        try:
+            await self.ctrl.trigger_hotkey(name)
+        except Exception:
+            pass
 
     async def lipsync_wav(self, wav_path: str):
         """Stream mouth-open values by reading a local WAV file path."""

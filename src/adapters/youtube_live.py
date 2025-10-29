@@ -1,54 +1,171 @@
-from __future__ import annotations
+"""
+YouTube Live Adapter
+"""
 import asyncio
+import logging
 from typing import Optional
+import os
 
-import pytchat
-
-from core.types import Message, Source
-from core.config import get_settings
-from core.policy import PolicyGuard
+logger = logging.getLogger(__name__)
 
 class YouTubeLiveAdapter:
-    def __init__(self, scheduler) -> None:
-        self.settings = get_settings()
-        self.scheduler = scheduler
-        self.policy = PolicyGuard(allow_mild_profanity=True)
-        self._task: Optional[asyncio.Task] = None
+    def __init__(self, orchestrator, stream_id: Optional[str] = None):
+        self.orchestrator = orchestrator
+        self.stream_id = stream_id
+        self.should_stop = False
+        self.task = None
+        
+        self.mock_mode = os.getenv("YOUTUBE_MOCK_MODE", "false").lower() == "true"
+        
+        if self.mock_mode:
+            logger.info("🧪 YouTube Mock Mode: เปิด")
+        elif not stream_id:
+            logger.warning("⚠️ ไม่มี YOUTUBE_STREAM_ID ใน .env")
+        else:
+            logger.info(f"✅ YouTube Live: Stream ID = {stream_id}")
+
+    async def start(self):
+        """เริ่มอ่านแชท YouTube"""
+        if self.task and not self.task.done():
+            logger.warning("YouTube adapter กำลังทำงานอยู่แล้ว")
+            return
+        
+        self.should_stop = False
+        
+        if self.mock_mode:
+            self.task = asyncio.create_task(self._mock_chat_loop())
+            logger.info("🧪 Mock chat loop เริ่มทำงาน")
+        elif self.stream_id:
+            self.task = asyncio.create_task(self._real_chat_loop())
+            logger.info("📺 YouTube chat loop เริ่มทำงาน")
+        else:
+            logger.warning("ไม่สามารถเริ่ม YouTube adapter")
+
+    async def stop(self):
+        """หยุดอ่านแชท"""
+        self.should_stop = True
+        if self.task:
+            try:
+                await asyncio.wait_for(self.task, timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning("YouTube task timeout")
+            self.task = None
+        logger.info("⏹️ YouTube adapter หยุดแล้ว")
+
+    async def _mock_chat_loop(self):
+        """Mock Chat Loop: จำลองข้อความจาก YouTube"""
+        logger.info("🧪 Mock YouTube Chat เริ่มต้น")
+        
+        mock_messages = [
+            {"author": "TestUser1", "message": "สวัสดีครับ!", "is_question": False},
+            {"author": "TestUser2", "message": "เธอชื่ออะไร?", "is_question": True},
+            {"author": "TestUser3", "message": "วันนี้อากาศเป็นไงบ้าง?", "is_question": True},
+            {"author": "TestUser4", "message": "น่ารักจัง~", "is_question": False},
+            {"author": "TestUser5", "message": "ช่วยอธิบาย AI หน่อย", "is_question": True},
+            {"author": "TestUser6", "message": "เก่งมาก!", "is_question": False},
+            {"author": "TestUser7", "message": "ร้องเพลงได้มั้ย?", "is_question": True},
+        ]
+        
+        idx = 0
+        
+        while not self.should_stop:
+            try:
+                await asyncio.sleep(20)
+                
+                msg = mock_messages[idx % len(mock_messages)]
+                idx += 1
+                
+                logger.info(f"🧪 [Mock] {msg['author']}: {msg['message']}")
+                
+                if msg['is_question']:
+                    from src.core.scheduler import Message
+                    
+                    message_obj = Message(
+                        priority=5,
+                        source="youtube",
+                        is_question=True,
+                        author=msg['author'],
+                        text=msg['message'],
+                        channel_id="mock_yt_channel"
+                    )
+                    
+                    await self.orchestrator.scheduler.add_message(message_obj)
+                    logger.info(f"📨 [Mock] ส่งคำถามเข้าคิว: {msg['message']}")
+                else:
+                    logger.info(f"⏭️ [Mock] ข้ามข้อความที่ไม่ใช่คำถาม")
+                
+            except Exception as e:
+                logger.error(f"Mock chat loop error: {e}", exc_info=True)
+                await asyncio.sleep(5)
+        
+        logger.info("🧪 Mock chat loop หยุด")
+
+    async def _real_chat_loop(self):
+        """Real Chat Loop: อ่านแชทจาก YouTube Live จริง"""
+        try:
+            import pytchat
+            
+            chat = pytchat.create(video_id=self.stream_id)
+            logger.info(f"📺 เชื่อมต่อ YouTube Live: {self.stream_id}")
+            
+            while not self.should_stop and chat.is_alive():
+                try:
+                    for c in chat.get().sync_items():
+                        if self.should_stop:
+                            break
+                        
+                        author = c.author.name
+                        message = c.message
+                        
+                        logger.info(f"💬 [YT] {author}: {message}")
+                        
+                        is_question = self._is_question(message)
+                        
+                        if is_question:
+                            from src.core.scheduler import Message
+                            
+                            msg_obj = Message(
+                                priority=5,
+                                source="youtube",
+                                is_question=True,
+                                author=author,
+                                text=message,
+                                channel_id=self.stream_id
+                            )
+                            
+                            await self.orchestrator.scheduler.add_message(msg_obj)
+                            logger.info(f"📨 [YT] ส่งคำถามเข้าคิว")
+                        else:
+                            logger.debug(f"⏭️ [YT] ข้ามข้อความที่ไม่ใช่คำถาม")
+                    
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"Chat parsing error: {e}")
+                    await asyncio.sleep(2)
+            
+            chat.terminate()
+            logger.info("📺 YouTube chat loop หยุด")
+            
+        except ImportError:
+            logger.error("ต้องติดตั้ง pytchat: pip install pytchat")
+        except Exception as e:
+            logger.error(f"YouTube chat error: {e}", exc_info=True)
 
     def _is_question(self, text: str) -> bool:
-        t = text.strip()
-        return any(s in t for s in ("?", "ทำไม", "อย่างไร", "คืออะไร", "ได้ไหม"))
+        """ตรวจสอบว่าข้อความเป็นคำถามหรือไม่"""
+        question_markers = ["?", "ไหม", "มั้ย", "หรือ", "อะไร", "ทำไม", "ยังไง", "ช่วย", "แนะนำ"]
+        
+        text_lower = text.lower()
+        
+        for marker in question_markers:
+            if marker in text_lower:
+                return True
+        
+        return False
 
-    async def _reader(self):
-        stream_id = self.settings.YOUTUBE_STREAM_ID
-        if not stream_id:
-            print("YOUTUBE_STREAM_ID ไม่ถูกตั้งค่าใน .env")
-            return
-        chat = pytchat.create(video_id=stream_id)
-        try:
-            while chat.is_alive():
-                # อ่านเฉพาะล่าสุดเมื่อระบบพร้อมตอบ
-                if not self.scheduler.busy:
-                    latest = None
-                    for c in chat.get().items:
-                        latest = c
-                    if latest:
-                        text = latest.message
-                        msg = Message(
-                            text=text,
-                            source=Source.YOUTUBE,
-                            author=latest.author.name,
-                            is_question=self._is_question(text),
-                            priority=self.settings.YOUTUBE_PRIORITY,
-                        )
-                        ok, _ = self.policy.check_message_ok(msg)
-                        if ok:
-                            await self.scheduler.enqueue(msg)
-                await asyncio.sleep(0.8)
-        finally:
-            chat.terminate()
 
-    def start(self):
-        if self._task and not self._task.done():
-            return
-        self._task = asyncio.create_task(self._reader())
+def create_youtube_adapter(orchestrator):
+    """สร้าง YouTube adapter จาก config"""
+    stream_id = os.getenv("YOUTUBE_STREAM_ID")
+    return YouTubeLiveAdapter(orchestrator, stream_id)

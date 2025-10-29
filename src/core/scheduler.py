@@ -33,6 +33,21 @@ class PriorityScheduler:
         effective_priority = msg.priority
         await self._queue.put((effective_priority, self._next_counter(), msg))
 
+    async def get_next_message(self, timeout: Optional[float] = None) -> Optional[Message]:
+        """ดึงข้อความถัดไปจากคิวตามลำดับความสำคัญ
+        - หากกำหนด `timeout` จะรอไม่เกินเวลาที่ระบุแล้วคืนค่า None ถ้าไม่มี
+        - คืนค่า `Message` ที่ต่อคิวอยู่ หรือ None หากหมดเวลา
+        """
+        try:
+            if timeout and timeout > 0:
+                item = await asyncio.wait_for(self._queue.get(), timeout=timeout)
+            else:
+                item = await self._queue.get()
+            _, _, msg = item
+            return msg
+        except asyncio.TimeoutError:
+            return None
+
     async def start(self, worker: Callable[[Message], Awaitable[None]]) -> None:
         while True:
             priority, _, msg = await self._queue.get()
