@@ -76,10 +76,10 @@ class F5TTSThai:
                 ref_text = self.ref_text
                 logger.info(f"🎙️ ใช้ reference: {ref_text[:30]}...")
             else:
-                # ไม่ใช้ reference - ใช้เสียงเงียบ
-                ref_audio = self._get_silent_reference()
-                ref_text = ""
-                logger.info("🔇 ไม่ใช้ reference")
+                # ไม่ใช้ reference: ส่ง None เพื่อข้ามขั้นตอน preprocess/transcribe ของไลบรารี
+                ref_audio = None
+                ref_text = None
+                logger.info("🔇 ปิด reference (skip preprocess)")
 
             # เรียก TTS.infer ตาม API ที่ถูกต้อง
             generated_audio = self.tts.infer(
@@ -102,7 +102,8 @@ class F5TTSThai:
 
         except Exception as e:
             logger.error(f"❌ F5-TTS synthesis error: {e}", exc_info=True)
-            return self._generate_silence(2.0)
+            # หากเกิดข้อผิดพลาด ให้คืนเสียงเงียบสั้น ๆ เพื่อไม่ให้ Discord เล่นไฟล์ว่าง
+            return self._generate_silence(1.0)
 
     def _clean_audio(self, audio: np.ndarray) -> np.ndarray:
         """ทำความสะอาดเสียง"""

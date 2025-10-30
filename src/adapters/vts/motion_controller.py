@@ -48,6 +48,19 @@ class MotionController:
         self.next_action_time = time.time()
         self.current_action: Optional[MotionAction] = None
         self.action_progress = 0.0
+        # จดจำท่าล่าสุดเพื่อหลีกเลี่ยงการซ้ำติดกัน
+        from collections import deque
+        self._recent_actions = deque(maxlen=3)
+
+        # รอยยิ้ม: ฐาน + ramp แบบค่อยๆ เพิ่มและลดเป็นช่วง ๆ
+        self.smile_base = 0.35
+        self.smile_value = self.smile_base
+        self.smile_target = self.smile_base
+        self.smile_peak = 0.85
+        self.smile_speed_up = 1.2   # หน่วยต่อวินาที
+        self.smile_speed_down = 0.8 # หน่วยต่อวินาที
+        self.next_smile_time = time.time() + random.uniform(8.0, 14.0)
+        self.smile_hold_until = 0.0
         
         # Config
         # เพิ่มความสมูทเริ่มต้นให้สูงขึ้น ลดอาการสั่น
@@ -74,6 +87,20 @@ class MotionController:
         self.idle_actions = [a for a in self.action_pool if a.name.startswith("idle_") or "idle" in a.name]
         
         logger.info(f"✅ Neuro Motion: {len(self.action_pool)} actions, intensity={self.intensity}, duration_scale={self.action_duration_scale}")
+
+        # เตรียมแผนที่ชื่อพารามิเตอร์ (จะรีเฟรชอีกครั้งตอน start หลัง verify_connection)
+        self._param_names = {
+            "AngleX": "FaceAngleX",
+            "AngleY": "FaceAngleY",
+            "AngleZ": "FaceAngleZ",
+            "PosX": "FacePositionX",
+            "PosY": "FacePositionY",
+            "MouthSmile": "MouthSmile",
+            "EyeSmileL": "ParamEyeLSmile",
+            "EyeSmileR": "ParamEyeRSmile",
+            "EyeOpenL": "EyeOpenLeft",
+            "EyeOpenR": "EyeOpenRight",
+        }
 
     def _create_action_pool(self) -> List[MotionAction]:
         """
@@ -212,9 +239,37 @@ class MotionController:
             logger.warning("Motion loop กำลังทำงานอยู่แล้ว")
             return
         
+        # รีโซลฟ์ชื่อพารามิเตอร์อีกครั้ง หลัง verify_connection เพื่อให้ตรงกับโมเดลจริง
+        try:
+            self._param_names = {
+                # Angles
+                "AngleX": self.vts.resolve_param_name("FaceAngleX", "ParamAngleX", "AngleX"),
+                "AngleY": self.vts.resolve_param_name("FaceAngleY", "ParamAngleY", "AngleY"),
+                "AngleZ": self.vts.resolve_param_name("FaceAngleZ", "ParamAngleZ", "AngleZ"),
+                # Positions
+                "PosX": self.vts.resolve_param_name("FacePositionX", "ParamPositionX", "PositionX", "ParamPosX", "PosX"),
+                "PosY": self.vts.resolve_param_name("FacePositionY", "ParamPositionY", "PositionY", "ParamPosY", "PosY"),
+                # Mouth/Eye
+                "MouthSmile": self.vts.resolve_param_name("MouthSmile", "ParamMouthSmile", "Smile"),
+                "EyeSmileL": self.vts.resolve_param_name("ParamEyeLSmile", "EyeSmileLeft", "ParamEyeSmileLeft"),
+                "EyeSmileR": self.vts.resolve_param_name("ParamEyeRSmile", "EyeSmileRight", "ParamEyeSmileRight"),
+                "EyeOpenL": self.vts.resolve_param_name("EyeOpenLeft", "ParamEyeOpenLeft", "EyeOpenL", "ParamEyeOpenL"),
+                "EyeOpenR": self.vts.resolve_param_name("EyeOpenRight", "ParamEyeOpenRight", "EyeOpenR", "ParamEyeOpenR"),
+            }
+        except Exception:
+            pass
+
         self.should_stop = False
         self.motion_task = asyncio.create_task(self._motion_loop())
         logger.info("🎬 Neuro Motion เริ่มทำงาน")
+        # บังคับให้ยิ้มทันทีด้วย hotkey หากมี
+        try:
+            if self.vts._is_connected():
+                ok = await self.vts.trigger_hotkey_by_name(["smile", "happy", "ยิ้ม"])  # สนับสนุนชื่อไทยด้วย
+                if ok:
+                    logger.info("😊 บังคับยิ้มผ่าน Hotkey แล้ว")
+        except Exception:
+            pass
 
     async def stop(self):
         """หยุด motion loop"""
@@ -249,7 +304,7 @@ class MotionController:
                 dt = self.update_dt  # ~30 FPS
                 self.breath_time += dt
                 
-                # === เลือกท่าทางใหม่ด้วยช่วงพัก ===
+        # === เลือกท่าทางใหม่ด้วยช่วงพัก ===
                 if self.current_action is not None and self.action_progress >= 1.0:
                     self.current_action = None
                     self.action_progress = 0.0
@@ -269,6 +324,10 @@ class MotionController:
                 # === Breathing + Blinking (ทำตลอด) ===
                 await self._update_breathing()
                 await self._update_blinking()
+                await self._update_smile()
+
+                # ส่งพารามิเตอร์ทุกเฟรม เพื่อให้การหายใจ/ยิ้มต่อเนื่องแม้ช่วงพักท่า
+                await self._apply_parameters()
                 
                 await asyncio.sleep(dt)
                 
@@ -305,9 +364,19 @@ class MotionController:
         total = sum(probs)
         normalized_probs = [p / total for p in probs]
         
-        self.current_action = random.choices(actions, weights=normalized_probs)[0]
+        # หลีกเลี่ยงท่าที่ซ้ำกับล่าสุด
+        for _ in range(10):
+            candidate = random.choices(actions, weights=normalized_probs)[0]
+            if not any(candidate.name == a.name for a in self._recent_actions):
+                self.current_action = candidate
+                break
+        else:
+            # หากสุ่มไม่ผ่านเงื่อนไข ให้เลือกตามเดิม
+            self.current_action = random.choices(actions, weights=normalized_probs)[0]
+
         self.action_progress = 0.0
         self.action_timer = time.time()
+        self._recent_actions.append(self.current_action)
         
         logger.debug(f"🎭 Action: {self.current_action.name} ({self.current_action.duration}s)")
 
@@ -368,18 +437,54 @@ class MotionController:
             body_y_with_breath = self.current_body_y + (self.breath_value * 0.5)
 
             params = {
-                "FaceAngleX": self.current_head_x * 30.0,
-                "FaceAngleY": self.current_head_y * 30.0,
-                "FaceAngleZ": self.current_head_z * 30.0,
-                "FacePositionX": self.current_body_x * 10.0,
-                "FacePositionY": body_y_with_breath * 5.0,
+                self._param_names["AngleX"]: self.current_head_x * 30.0,
+                self._param_names["AngleY"]: self.current_head_y * 30.0,
+                self._param_names["AngleZ"]: self.current_head_z * 30.0,
+                self._param_names["PosX"]: self.current_body_x * 10.0,
+                self._param_names["PosY"]: body_y_with_breath * 5.0,
             }
+
+            # รอยยิ้ม: ฐาน + ไมโครเวฟ + ramp
+            micro = (math.sin(self.breath_time * 0.7) + math.sin(self.breath_time * 0.37 + 1.1)) * 0.05
+            mouth_smile = max(0.0, min(1.0, self.smile_value + micro))
+            eye_smile = max(0.0, min(1.0, 0.25 + mouth_smile * 0.25 + math.sin(self.breath_time * 0.5) * 0.06))
+
+            params.update({
+                self._param_names["MouthSmile"]: mouth_smile,
+                self._param_names["EyeSmileL"]: eye_smile,
+                self._param_names["EyeSmileR"]: eye_smile,
+            })
 
             # ส่งแบบ batch เพียงครั้งเดียวในแต่ละ tick
             await self.vts.inject_parameters_bulk(params)
                 
         except:
             pass
+
+    async def _update_smile(self):
+        """อัพเดทรอยยิ้มให้มีช่วงยิ้มกว้างขึ้นแบบค่อยๆ เพิ่ม/ลด"""
+        dt = self.update_dt
+        now = time.time()
+
+        # ทริกเกอร์รอบใหม่เป็นช่วง ๆ โดยสุ่มระหว่าง 8–14 วินาที
+        if now >= self.next_smile_time and now >= self.smile_hold_until:
+            self.smile_target = self.smile_peak
+            # ถือรอยยิ้มกว้างไว้ช่วงสั้น ๆ หลัง ramp ถึงเป้าหมาย
+            self.smile_hold_until = 0.0  # จะตั้งหลังถึงเป้าหมาย
+        
+        # เคลื่อนค่าไปยังเป้าหมายแบบนุ่มนวล
+        if self.smile_target > self.smile_value:
+            self.smile_value += self.smile_speed_up * dt
+            if self.smile_value >= self.smile_target:
+                self.smile_value = self.smile_target
+                # ถือไว้ 0.7–1.2 วินาที แล้วค่อยลดลง
+                self.smile_hold_until = now + random.uniform(0.7, 1.2)
+                self.smile_target = self.smile_base
+                self.next_smile_time = now + random.uniform(8.0, 14.0)
+        else:
+            self.smile_value -= self.smile_speed_down * dt
+            if self.smile_value < self.smile_base:
+                self.smile_value = self.smile_base
 
     async def _update_breathing(self):
         """Breathing Animation"""
@@ -415,14 +520,14 @@ class MotionController:
             if now >= next_blink:
                 # ปิดตาแบบ batch
                 await self.vts.inject_parameters_bulk({
-                    "EyeOpenLeft": 0.0,
-                    "EyeOpenRight": 0.0,
+                    self._param_names["EyeOpenL"]: 0.0,
+                    self._param_names["EyeOpenR"]: 0.0,
                 })
                 await asyncio.sleep(blink_duration)
                 # เปิดตาแบบ batch
                 await self.vts.inject_parameters_bulk({
-                    "EyeOpenLeft": 1.0,
-                    "EyeOpenRight": 1.0,
+                    self._param_names["EyeOpenL"]: 1.0,
+                    self._param_names["EyeOpenR"]: 1.0,
                 })
                 
                 self.blink_timer = time.time()
@@ -455,7 +560,8 @@ class MotionController:
 def create_motion_controller(vts_client, env_config: dict):
     """สร้าง Motion Controller"""
     config = {
-        "smoothing": env_config.get("VTS_MOVEMENT_SMOOTHING", "0.75"),
+        # เพิ่มค่าเริ่มต้นให้สมูทมากขึ้น เพื่อลดอาการวาป/สั่น
+        "smoothing": env_config.get("VTS_MOVEMENT_SMOOTHING", "0.96"),
         "intensity": env_config.get("VTS_MOTION_INTENSITY", "1.0"),
         # รองรับการตั้งค่าเฟรมเรตจาก .env เพื่อลดภาระการส่งพารามิเตอร์
         "update_dt": env_config.get("VTS_UPDATE_DT", None),

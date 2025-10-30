@@ -112,14 +112,24 @@ class AIVTuberOrchestrator:
             
             logger.info("📡 กำลังเชื่อมต่อ VTS...")
             await self.vts.connect()
-            
+
             # ✅ ใช้ method _is_connected() แทน
             if not self.vts._is_connected():
                 logger.warning("⚠️ ไม่สามารถเชื่อมต่อ VTS")
                 logger.warning("   ตรวจสอบ: VTube Studio เปิดอยู่และ API enabled (port 8001)")
             else:
+                try:
+                    # Discover parameters to ensure correct names for injection
+                    await self.vts.verify_connection()
+                except Exception:
+                    pass
                 logger.info("🎭 เริ่ม Motion Controller...")
                 await self.motion.start()
+                # บังคับให้เห็นการขยับและยิ้มทันที หากมีพารามิเตอร์/ฮ็อตคีย์ที่รองรับ
+                try:
+                    await self.vts.kickstart_motion_and_smile()
+                except Exception:
+                    pass
             
             logger.info("⚙️ เริ่ม Message Worker...")
             worker_task = asyncio.create_task(self._message_worker())
@@ -178,8 +188,37 @@ class AIVTuberOrchestrator:
                 
                 self.motion.set_generating(False)
                 
-                if audio_bytes and self.vts.ws and not self.vts.ws.closed:
-                    await self.vts.lipsync_bytes(audio_bytes)
+                if audio_bytes:
+                    # ลิปซิงก์ควบคู่กับการเล่นเสียง
+                    lipsync_task = None
+                    try:
+                        if self.vts.ws and not self.vts.ws.closed:
+                            lipsync_task = asyncio.create_task(self.vts.lipsync_bytes(audio_bytes))
+                    except Exception:
+                        lipsync_task = None
+                    # เล่นเสียงแบบ local บน Windows (winsound)
+                    try:
+                        import tempfile, os, sys
+                        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                        temp_wav.write(audio_bytes)
+                        temp_wav.close()
+                        if sys.platform.startswith('win'):
+                            import winsound
+                            winsound.PlaySound(temp_wav.name, winsound.SND_FILENAME)
+                        else:
+                            # Fallback: ไม่รองรับ winsound — ข้ามการเล่นเสียง
+                            pass
+                        try:
+                            os.remove(temp_wav.name)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    if lipsync_task:
+                        try:
+                            await lipsync_task
+                        except Exception:
+                            pass
                 
                 logger.info("✅ ประมวลผลเสร็จสิ้น")
                 
