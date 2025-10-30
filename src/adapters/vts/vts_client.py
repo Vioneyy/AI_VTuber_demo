@@ -20,6 +20,10 @@ class VTSClient:
         self.ws = None
         self.auth_token = None
         self.is_authenticated = False
+        # Discovered parameter names
+        self.available_parameters = []
+        self.available_input_parameters = []
+        self.available_hotkeys = []
         # Rate limiting และ delta-filter สำหรับการส่งพารามิเตอร์
         self._last_send_ts = 0.0
         # ลดการส่งค่าเริ่มต้นลง (80ms ≈ 12.5 FPS) เพื่อเสถียรภาพ
@@ -34,6 +38,10 @@ class VTSClient:
             "FaceAngleX": 1.5,
             "FaceAngleY": 1.5,
             "FaceAngleZ": 1.5,
+            # ลด threshold สำหรับรอยยิ้มให้ส่งได้ลื่นไหล
+            "MouthSmile": 0.05,
+            "ParamEyeLSmile": 0.08,
+            "ParamEyeRSmile": 0.08,
         }
         # ตัวแปรสำหรับ adaptive backoff และ suppression
         self._backoff_factor = 1.0
@@ -86,6 +94,11 @@ class VTSClient:
                 logger.info("✅ VTS เชื่อมต่อและ authenticate สำเร็จ")
             else:
                 logger.warning("⚠️ VTS เชื่อมต่อแต่ authenticate ไม่สำเร็จ")
+            # Try to verify and discover parameters/hotkeys
+            try:
+                await self.verify_connection()
+            except Exception:
+                pass
             
         except asyncio.TimeoutError:
             logger.error("❌ VTS connection timeout")
@@ -148,6 +161,77 @@ class VTSClient:
             
         except Exception as e:
             logger.error(f"❌ Authentication error: {e}")
+
+    async def verify_connection(self):
+        """Fetch parameter lists and hotkeys to enable name resolution."""
+        if not self._is_connected() or not self.is_authenticated:
+            return
+        try:
+            # Request input parameters (preferred for injection)
+            msg_inputs = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "input_params",
+                "messageType": "InputParameterListRequest",
+                "data": {}
+            }
+            await self.ws.send(json.dumps(msg_inputs))
+            resp_inputs = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            data_inputs = json.loads(resp_inputs)
+            names_inputs = [p.get("name") or p.get("parameterName") or p.get("id") for p in data_inputs.get("data", {}).get("parameters", [])]
+            self.available_input_parameters = [n for n in names_inputs if isinstance(n, str)]
+        except Exception:
+            self.available_input_parameters = []
+        try:
+            # Request model parameters
+            msg_params = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "model_params",
+                "messageType": "ParameterListRequest",
+                "data": {}
+            }
+            await self.ws.send(json.dumps(msg_params))
+            resp_params = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            data_params = json.loads(resp_params)
+            names_params = [p.get("name") or p.get("parameterName") or p.get("id") for p in data_params.get("data", {}).get("parameters", [])]
+            self.available_parameters = [n for n in names_params if isinstance(n, str)]
+        except Exception:
+            self.available_parameters = []
+        try:
+            # Request hotkeys
+            msg_hotkeys = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "hotkeys",
+                "messageType": "HotkeysInCurrentModelRequest",
+                "data": {}
+            }
+            await self.ws.send(json.dumps(msg_hotkeys))
+            resp_hotkeys = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            data_hotkeys = json.loads(resp_hotkeys)
+            # Store full info for name-based triggering
+            self.available_hotkeys = [
+                {
+                    "hotkeyID": h.get("hotkeyID"),
+                    "name": h.get("name") or h.get("description")
+                }
+                for h in data_hotkeys.get("data", {}).get("availableHotkeys", [])
+                if isinstance(h.get("hotkeyID"), str)
+            ]
+        except Exception:
+            self.available_hotkeys = []
+        logger.info(f"🎯 พารามิเตอร์ Input: {len(self.available_input_parameters)}, Model: {len(self.available_parameters)}, Hotkeys: {len(self.available_hotkeys)}")
+
+    def resolve_param_name(self, *candidates: str) -> str:
+        """Pick the first existing parameter from inputs, then model params, else fallback."""
+        sets = [set(self.available_input_parameters or []), set(self.available_parameters or [])]
+        for name in candidates:
+            for s in sets:
+                if name in s:
+                    return name
+        # If we don't have discovery, still return the first candidate
+        return candidates[0] if candidates else ""
 
     async def disconnect(self):
         """ตัดการเชื่อมต่อ"""
@@ -263,6 +347,23 @@ class VTSClient:
         except Exception as e:
             logger.error(f"Trigger hotkey error: {e}")
 
+    async def trigger_hotkey_by_name(self, substrings):
+        """Trigger first hotkey whose name contains any of substrings (case-insensitive)."""
+        if not self._is_connected() or not self.is_authenticated:
+            return False
+        try:
+            if not self.available_hotkeys:
+                await self.verify_connection()
+            subs = [s.lower() for s in (substrings or [])]
+            for hk in (self.available_hotkeys or []):
+                name = (hk.get("name") or "").lower()
+                if any(s in name for s in subs):
+                    await self.trigger_hotkey(hk.get("hotkeyID"))
+                    return True
+        except Exception:
+            pass
+        return False
+
     async def lipsync_bytes(self, audio_bytes: bytes):
         """
         ลิปซิงก์จาก audio bytes
@@ -286,6 +387,7 @@ class VTSClient:
             logger.info(f"🎤 Lipsync: {duration:.2f}s, {sample_rate}Hz")
             
             # จำลองลิปซิงก์แบบง่าย (sine wave)
+            mouth_param = self.resolve_param_name("MouthOpen", "ParamMouthOpen", "MouthOpenY")
             steps = int(duration * 20)  # 20 FPS
             for i in range(steps):
                 t = i / 20.0
@@ -293,13 +395,63 @@ class VTSClient:
                 # Mouth open based on sine wave
                 mouth_value = abs(np.sin(t * 10.0)) * 0.8
                 
-                await self.inject_parameter("MouthOpen", mouth_value)
+                await self.inject_parameter(mouth_param, mouth_value)
                 await asyncio.sleep(0.05)
             
             # ปิดปาก
-            await self.inject_parameter("MouthOpen", 0.0)
+            await self.inject_parameter(mouth_param, 0.0)
             
             logger.info("✅ Lipsync เสร็จสิ้น")
             
         except Exception as e:
             logger.error(f"Lipsync error: {e}", exc_info=True)
+
+    async def kickstart_motion_and_smile(self):
+        """บังคับฉีดค่าพารามิเตอร์ให้เห็นการขยับและรอยยิ้มทันที ถ้าเป็นไปได้"""
+        if not self._is_connected() or not self.is_authenticated:
+            logger.warning("VTS ไม่ได้เชื่อมต่อหรือยังไม่ authenticated — ข้าม kickstart")
+            return
+        try:
+            # ค้นหาชื่อพารามิเตอร์ที่เกี่ยวกับการขยับศีรษะ/ลำตัว
+            angle_x = self.resolve_param_name("AngleX", "FaceAngleX", "ParamAngleX", "HeadX", "RotX")
+            angle_y = self.resolve_param_name("AngleY", "FaceAngleY", "ParamAngleY", "HeadY", "RotY")
+            angle_z = self.resolve_param_name("AngleZ", "FaceAngleZ", "ParamAngleZ", "HeadZ", "RotZ")
+            pos_x = self.resolve_param_name("PosX", "FacePositionX", "ParamPositionX", "PositionX", "BodyX")
+            pos_y = self.resolve_param_name("PosY", "FacePositionY", "ParamPositionY", "PositionY", "BodyY")
+
+            # ค้นหายิ้ม
+            mouth_smile = self.resolve_param_name("MouthSmile", "Smile", "MouthHappy", "ParamMouthSmile")
+            eye_smile_l = self.resolve_param_name("EyeSmileL", "EyeSmileLeft", "ParamEyeSmileLeft", "ParamEyeLSmile")
+            eye_smile_r = self.resolve_param_name("EyeSmileR", "EyeSmileRight", "ParamEyeSmileRight", "ParamEyeRSmile")
+
+            payload = {}
+            # ใส่ค่าขยับเล็กน้อยให้เห็นการเปลี่ยนแปลง
+            if angle_x:
+                payload[angle_x] = 10.0
+            if angle_y:
+                payload[angle_y] = -5.0
+            if angle_z:
+                payload[angle_z] = 8.0
+            if pos_x:
+                payload[pos_x] = 0.2
+            if pos_y:
+                payload[pos_y] = -0.15
+
+            # ใส่ค่ารอยยิ้ม
+            if mouth_smile:
+                payload[mouth_smile] = 0.75
+            if eye_smile_l:
+                payload[eye_smile_l] = 0.6
+            if eye_smile_r:
+                payload[eye_smile_r] = 0.6
+
+            if payload:
+                await self.inject_parameters_bulk(payload)
+                logger.info("🚀 Kickstart motion/smile injected")
+            else:
+                # ถ้าไม่มีพารามิเตอร์ยิ้ม ให้ลองใช้ฮ็อตคีย์ยิ้มแทน
+                ok = await self.trigger_hotkey_by_name(["smile", "happy", "ยิ้ม"])  # รองรับไทยด้วย
+                if ok:
+                    logger.info("😊 Kickstart ด้วย hotkey สำเร็จ")
+        except Exception as e:
+            logger.error(f"Kickstart motion/smile error: {e}")

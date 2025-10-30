@@ -250,6 +250,20 @@ class DiscordBot(commands.Bot):
             )
             
             if self.voice_client and self.voice_client.is_connected():
+                # แจ้ง MotionController ว่ากำลังพูด เพื่อ bias ท่าทางให้มีชีวิตชีวา
+                try:
+                    self.orchestrator.motion.set_speaking(True)
+                except Exception:
+                    pass
+
+                # ตรวจสอบ ffmpeg พร้อมใช้งาน
+                ffmpeg_ok = True
+                try:
+                    subprocess.run(["ffmpeg", "-version"], capture_output=True)
+                except Exception:
+                    ffmpeg_ok = False
+                    logger.warning("⚠️ ไม่พบ ffmpeg ใน PATH — พยายามเล่นต่อ แต่หากเล่นไม่ออกโปรดติดตั้ง ffmpeg")
+
                 audio_source = discord.FFmpegPCMAudio(
                     temp_path,
                     options="-filter:a 'volume=1.0'"
@@ -259,11 +273,29 @@ class DiscordBot(commands.Bot):
                     audio_source,
                     after=lambda e: logger.info(f"เล่นเสียงเสร็จ: {e}" if e else "เล่นเสียงเสร็จ")
                 )
-                
+                # ยืนยันว่าเริ่มเล่นจริงภายใน 2 วินาที
+                started = False
+                for _ in range(20):
+                    if self.voice_client.is_playing():
+                        started = True
+                        break
+                    await asyncio.sleep(0.1)
+                if not started:
+                    logger.error("❌ ไม่สามารถเริ่มเล่นเสียงใน Discord — ตรวจสอบ ffmpeg/สิทธิ์บอท/การเชื่อมต่อช่องเสียง")
+                    try:
+                        await ctx.send("❌ เล่นเสียงไม่สำเร็จ (ตรวจสอบ ffmpeg/เชื่อมต่อบอท)")
+                    except Exception:
+                        pass
+
                 while self.voice_client.is_playing():
                     await asyncio.sleep(0.1)
                 
                 logger.info("✅ เล่นเสียงใน Discord เสร็จ")
+                # ปิดสถานะกำลังพูด
+                try:
+                    self.orchestrator.motion.set_speaking(False)
+                except Exception:
+                    pass
             else:
                 logger.warning("ไม่ได้เชื่อมต่อช่องเสียง")
             
