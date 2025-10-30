@@ -189,10 +189,12 @@ class AIVTuberOrchestrator:
                 self.motion.set_generating(False)
                 
                 if audio_bytes:
-                    # ลิปซิงก์ควบคู่กับการเล่นเสียง
+                    # ตั้งสถานะกำลังพูด และลิปซิงก์ควบคู่ไปกับการเล่นเสียง
                     lipsync_task = None
                     try:
-                        if self.vts.ws and not self.vts.ws.closed:
+                        self.motion.set_speaking(True)
+                        if hasattr(self.vts, "_is_connected") and self.vts._is_connected():
+                            self.motion.set_lipsyncing(True)
                             lipsync_task = asyncio.create_task(self.vts.lipsync_bytes(audio_bytes))
                     except Exception:
                         lipsync_task = None
@@ -214,11 +216,20 @@ class AIVTuberOrchestrator:
                             pass
                     except Exception:
                         pass
+                    # ปิดสถานะกำลังพูด และลิปซิงก์หลังเล่นเสียง
+                    try:
+                        self.motion.set_speaking(False)
+                    except Exception:
+                        pass
                     if lipsync_task:
                         try:
                             await lipsync_task
                         except Exception:
                             pass
+                    try:
+                        self.motion.set_lipsyncing(False)
+                    except Exception:
+                        pass
                 
                 logger.info("✅ ประมวลผลเสร็จสิ้น")
                 

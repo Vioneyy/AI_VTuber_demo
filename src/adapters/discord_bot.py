@@ -1,5 +1,5 @@
 """
-Discord Bot Adapter
+Discord Bot Adapter (Fixed Audio System)
 """
 import discord
 from discord.ext import commands
@@ -9,6 +9,7 @@ import os
 import tempfile
 import subprocess
 from io import BytesIO
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class DiscordBot(commands.Bot):
         self.orchestrator = orchestrator
         self.voice_client = None
         self.is_recording = False
+        self.current_audio_source = None
         
         self._register_commands()
         
@@ -44,11 +46,14 @@ class DiscordBot(commands.Bot):
                 await self.voice_client.move_to(channel)
                 await ctx.send(f"✅ ย้ายไป {channel.name} แล้ว~")
             else:
-                self.voice_client = await channel.connect()
-                await ctx.send(f"✅ เข้า {channel.name} แล้วนะ!")
+                try:
+                    self.voice_client = await channel.connect()
+                    await ctx.send(f"✅ เข้า {channel.name} แล้วนะ!")
+                    logger.info(f"Joined voice channel: {channel.name}")
+                except Exception as e:
+                    await ctx.send(f"❌ ไม่สามารถเข้าช่องเสียงได้: {e}")
+                    logger.error(f"Join error: {e}")
             
-            logger.info(f"Joined voice channel: {channel.name}")
-
         @self.command(name="leave")
         async def leave(ctx):
             """ออกจากช่องเสียง"""
@@ -67,19 +72,30 @@ class DiscordBot(commands.Bot):
                 await ctx.send("❌ ต้อง !join ก่อนนะ")
                 return
             
+            if len(text) > 200:
+                await ctx.send("❌ ข้อความยาวเกินไป (จำกัด 200 ตัวอักษร)")
+                return
+            
             await ctx.send(f"💬 กำลังพูด: {text[:50]}...")
             
             try:
                 logger.info(f"[SAY] สังเคราะห์เสียง: {text}")
+                
+                # สังเคราะห์เสียง
                 audio_bytes = await self._synthesize_speech(text)
                 
                 if not audio_bytes:
                     await ctx.send("❌ ไม่สามารถสังเคราะห์เสียงได้")
                     return
                 
-                await self._play_audio_and_lipsync(audio_bytes, ctx)
+                # เล่นเสียง
+                success = await self._play_audio(audio_bytes, ctx)
                 
-                logger.info("[SAY] เสร็จสิ้น")
+                if success:
+                    await ctx.send("✅ พูดเสร็จแล้ว!")
+                    logger.info("[SAY] เสร็จสิ้น")
+                else:
+                    await ctx.send("❌ ไม่สามารถเล่นเสียงได้")
                 
             except Exception as e:
                 logger.error(f"Say command error: {e}", exc_info=True)
@@ -92,136 +108,100 @@ class DiscordBot(commands.Bot):
                 await ctx.send("❌ ต้อง !join ก่อนนะ")
                 return
             
+            if len(question) > 200:
+                await ctx.send("❌ คำถามยาวเกินไป (จำกัด 200 ตัวอักษร)")
+                return
+            
             await ctx.send(f"🤔 คำถาม: {question[:50]}...")
             
             try:
                 logger.info(f"[ASK] คำถาม: {question}")
-                answer = self.orchestrator.llm.generate_response(question)
+                
+                # ส่งให้ LLM ตอบ
+                answer = await asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    self.orchestrator.llm.generate_response, 
+                    question
+                )
+                
+                if not answer:
+                    await ctx.send("❌ ไม่ได้รับคำตอบจาก AI")
+                    return
                 
                 await ctx.send(f"💡 ตอบ: {answer}")
                 
+                # สังเคราะห์และเล่นเสียง
                 audio_bytes = await self._synthesize_speech(answer)
-                await self._play_audio_and_lipsync(audio_bytes, ctx)
+                if audio_bytes:
+                    success = await self._play_audio(audio_bytes, ctx)
+                    if not success:
+                        await ctx.send("⚠️ พูดไม่สำเร็จแต่ส่งข้อความแล้ว")
+                else:
+                    await ctx.send("❌ สังเคราะห์เสียงไม่สำเร็จ")
                 
             except Exception as e:
                 logger.error(f"Ask command error: {e}", exc_info=True)
                 await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
 
-        @self.command(name="test_voice")
-        async def test_voice(ctx, seconds: int = 5):
-            """ทดสอบ Voice-to-Voice"""
+        @self.command(name="test")
+        async def test(ctx):
+            """ทดสอบระบบเสียง"""
             if not self.voice_client or not self.voice_client.is_connected():
                 await ctx.send("❌ ต้อง !join ก่อนนะ")
                 return
             
-            await ctx.send(f"🎙️ บันทึกเสียง {seconds} วินาที... เริ่ม!")
+            await ctx.send("🔊 ทดสอบระบบเสียง...")
             
             try:
-                logger.info(f"[TEST_VOICE] บันทึกเสียง {seconds}s")
-                audio_file = await self._record_voice(seconds)
+                test_text = "สวัสดีค่ะ นี่คือการทดสอบระบบเสียง"
+                audio_bytes = await self._synthesize_speech(test_text)
                 
-                if not audio_file:
-                    await ctx.send("❌ ไม่สามารถบันทึกเสียงได้")
-                    return
-                
-                await ctx.send("✅ บันทึกเสร็จแล้ว กำลังถอดความ...")
-                
-                text = await self._transcribe_audio(audio_file)
-                
-                if not text:
-                    await ctx.send("❌ ไม่สามารถถอดเสียงได้")
-                    return
-                
-                await ctx.send(f"📝 คุณพูดว่า: **{text}**")
-                
-                logger.info(f"[TEST_VOICE] LLM กำลังคิด: {text}")
-                answer = self.orchestrator.llm.generate_response(text)
-                
-                await ctx.send(f"💬 ตอบ: {answer}")
-                
-                audio_bytes = await self._synthesize_speech(answer)
-                await self._play_audio_and_lipsync(audio_bytes, ctx)
-                
-                logger.info("[TEST_VOICE] เสร็จสมบูรณ์")
-                await ctx.send("✅ ทดสอบเสร็จสิ้น!")
-                
+                if audio_bytes:
+                    success = await self._play_audio(audio_bytes, ctx)
+                    if success:
+                        await ctx.send("✅ ทดสอบเสียงสำเร็จ!")
+                    else:
+                        await ctx.send("❌ เล่นเสียงไม่สำเร็จ")
+                else:
+                    await ctx.send("❌ สังเคราะห์เสียงไม่สำเร็จ")
+                    
             except Exception as e:
-                logger.error(f"Test voice error: {e}", exc_info=True)
+                logger.error(f"Test error: {e}", exc_info=True)
                 await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
 
-        @self.command(name="stt")
-        async def stt(ctx, seconds: int = 5):
-            """บันทึกเสียงแล้วถอดความ"""
-            if not self.voice_client or not self.voice_client.is_connected():
-                await ctx.send("❌ ต้อง !join ก่อนนะ")
-                return
-            
-            await ctx.send(f"🎙️ บันทึก {seconds} วินาที...")
-            
+        @self.command(name="motion")
+        async def motion(ctx):
+            """ทดสอบการเคลื่อนไหว"""
             try:
-                audio_file = await self._record_voice(seconds)
-                if audio_file:
-                    text = await self._transcribe_audio(audio_file)
-                    if text:
-                        await ctx.send(f"📝 ถอดความได้: {text}")
-                    else:
-                        await ctx.send("❌ ถอดเสียงไม่สำเร็จ")
-                else:
-                    await ctx.send("❌ บันทึกเสียงไม่สำเร็จ")
+                await self.orchestrator.motion.trigger_emotion("happy")
+                await ctx.send("💫 ทดสอบการเคลื่อนไหวแล้ว")
             except Exception as e:
-                await ctx.send(f"❌ Error: {e}")
-
-        @self.command(name="ttsref")
-        async def ttsref(ctx, mode: str):
-            """เปิด/ปิด TTS reference"""
-            if mode.lower() not in ["on", "off"]:
-                await ctx.send("❌ ใช้: !ttsref on หรือ !ttsref off")
-                return
-            
-            use_ref = (mode.lower() == "on")
-            self.orchestrator.tts.set_use_reference(use_ref)
-            await ctx.send(f"✅ TTS Reference: {'เปิด' if use_ref else 'ปิด'}")
-
-        @self.command(name="vtsstatus")
-        async def vtsstatus(ctx):
-            """ดูสถานะ VTS"""
-            vts = self.orchestrator.vts
-            status = "🟢 เชื่อมต่อ" if vts.ws and not vts.ws.closed else "🔴 ไม่ได้เชื่อมต่อ"
-            await ctx.send(f"**VTS Status:** {status}")
-
-        @self.command(name="emotion")
-        async def emotion(ctx, emo: str):
-            """Trigger emotion"""
-            await self.orchestrator.motion.trigger_emotion(emo)
-            await ctx.send(f"💫 อารมณ์: {emo}")
-
-        @self.command(name="persona")
-        async def persona(ctx, name: str = None):
-            """เปลี่ยนหรือดูบุคลิก AI"""
-            if not name:
-                from src.personality.persona import get_available_personas
-                personas = get_available_personas()
-                await ctx.send(f"🎭 **Persona ที่มี**: {', '.join(personas)}\nใช้: `!persona <name>`")
-                return
-            
-            try:
-                self.orchestrator.llm.set_persona(name)
-                await ctx.send(f"✅ เปลี่ยนเป็นบุคลิก: **{name}**")
-            except Exception as e:
-                await ctx.send(f"❌ ไม่พบบุคลิก '{name}' ลองใช้ `!persona` เพื่อดูรายชื่อ")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
 
     async def _synthesize_speech(self, text: str) -> bytes:
         """สังเคราะห์เสียงจากข้อความ"""
         try:
+            # แจ้งระบบว่ากำลังสร้างเสียง
             self.orchestrator.motion.set_generating(True)
 
             logger.info(f"🎤 TTS เริ่มสังเคราะห์: {text[:50]}...")
-            audio_bytes = self.orchestrator.tts.synthesize(text)
+            
+            # เรียก TTS (รันใน thread แยกเพื่อไม่บล็อก event loop)
+            audio_bytes = await asyncio.get_event_loop().run_in_executor(
+                None,
+                self.orchestrator.tts.synthesize,
+                text
+            )
 
             self.orchestrator.motion.set_generating(False)
 
             if not audio_bytes:
                 logger.error("TTS ไม่ได้คืนค่า audio bytes")
+                return None
+
+            # ตรวจสอบว่า audio_bytes ไม่ว่าง
+            if len(audio_bytes) < 100:
+                logger.error(f"Audio bytes สั้นเกินไป: {len(audio_bytes)} bytes")
                 return None
 
             logger.info(f"✅ TTS เสร็จ: {len(audio_bytes)} bytes")
@@ -232,158 +212,136 @@ class DiscordBot(commands.Bot):
             self.orchestrator.motion.set_generating(False)
             return None
 
-    async def _play_audio_and_lipsync(self, audio_bytes: bytes, ctx):
-        """เล่นเสียงใน Discord + ลิปซิงก์ VTS"""
-        if not audio_bytes:
-            logger.error("ไม่มี audio bytes")
-            return
+    async def _play_audio(self, audio_bytes: bytes, ctx) -> bool:
+        """เล่นเสียงใน Discord"""
+        if not audio_bytes or len(audio_bytes) < 100:
+            logger.error("ไม่มี audio bytes ที่ใช้ได้")
+            return False
+        
+        temp_path = None
         
         try:
+            # สร้างไฟล์ชั่วคราว
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
                 temp_audio.write(audio_bytes)
                 temp_path = temp_audio.name
             
-            logger.info(f"📂 บันทึกเสียงชั่วคราว: {temp_path}")
+            logger.info(f"📂 บันทึกเสียงชั่วคราว: {temp_path} ({len(audio_bytes)} bytes)")
             
-            lipsync_task = asyncio.create_task(
-                self.orchestrator.vts.lipsync_bytes(audio_bytes)
+            # ตรวจสอบ ffmpeg
+            if not await self._check_ffmpeg():
+                await ctx.send("❌ ไม่พบ ffmpeg ในระบบ โปรดติดตั้ง ffmpeg")
+                return False
+            
+            # แจ้ง MotionController ว่ากำลังพูด
+            self.orchestrator.motion.set_speaking(True)
+            # เริ่มลิปซิงก์ควบคู่ไปกับการเล่นเสียง
+            lipsync_task = None
+            try:
+                if self.orchestrator.vts and self.orchestrator.vts._is_connected():
+                    self.orchestrator.motion.set_lipsyncing(True)
+                    lipsync_task = asyncio.create_task(self.orchestrator.vts.lipsync_bytes(audio_bytes))
+            except Exception:
+                lipsync_task = None
+            
+            # สร้าง audio source
+            audio_source = discord.FFmpegPCMAudio(
+                temp_path,
+                before_options="-loglevel quiet",
+                options="-filter:a volume=1.0"
             )
             
-            if self.voice_client and self.voice_client.is_connected():
-                # แจ้ง MotionController ว่ากำลังพูด เพื่อ bias ท่าทางให้มีชีวิตชีวา
+            # เล่นเสียง
+            play_success = await self._play_audio_source(audio_source, ctx)
+            
+            # ปิดสถานะกำลังพูด
+            self.orchestrator.motion.set_speaking(False)
+            # รอให้ลิปซิงก์เสร็จ และปิดสถานะลิปซิงก์
+            if lipsync_task:
                 try:
-                    self.orchestrator.motion.set_speaking(True)
+                    await lipsync_task
                 except Exception:
                     pass
-
-                # ตรวจสอบ ffmpeg พร้อมใช้งาน
-                ffmpeg_ok = True
-                try:
-                    subprocess.run(["ffmpeg", "-version"], capture_output=True)
-                except Exception:
-                    ffmpeg_ok = False
-                    logger.warning("⚠️ ไม่พบ ffmpeg ใน PATH — พยายามเล่นต่อ แต่หากเล่นไม่ออกโปรดติดตั้ง ffmpeg")
-
-                audio_source = discord.FFmpegPCMAudio(
-                    temp_path,
-                    options="-filter:a 'volume=1.0'"
-                )
-                
-                self.voice_client.play(
-                    audio_source,
-                    after=lambda e: logger.info(f"เล่นเสียงเสร็จ: {e}" if e else "เล่นเสียงเสร็จ")
-                )
-                # ยืนยันว่าเริ่มเล่นจริงภายใน 2 วินาที
-                started = False
-                for _ in range(20):
-                    if self.voice_client.is_playing():
-                        started = True
-                        break
-                    await asyncio.sleep(0.1)
-                if not started:
-                    logger.error("❌ ไม่สามารถเริ่มเล่นเสียงใน Discord — ตรวจสอบ ffmpeg/สิทธิ์บอท/การเชื่อมต่อช่องเสียง")
-                    try:
-                        await ctx.send("❌ เล่นเสียงไม่สำเร็จ (ตรวจสอบ ffmpeg/เชื่อมต่อบอท)")
-                    except Exception:
-                        pass
-
-                while self.voice_client.is_playing():
-                    await asyncio.sleep(0.1)
-                
-                logger.info("✅ เล่นเสียงใน Discord เสร็จ")
-                # ปิดสถานะกำลังพูด
-                try:
-                    self.orchestrator.motion.set_speaking(False)
-                except Exception:
-                    pass
-            else:
-                logger.warning("ไม่ได้เชื่อมต่อช่องเสียง")
-            
-            await lipsync_task
-            
             try:
-                os.remove(temp_path)
-            except:
+                self.orchestrator.motion.set_lipsyncing(False)
+            except Exception:
                 pass
-                
+            
+            return play_success
+            
         except Exception as e:
             logger.error(f"Play audio error: {e}", exc_info=True)
+            self.orchestrator.motion.set_speaking(False)
+            return False
+        finally:
+            # ลบไฟล์ชั่วคราว
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception as e:
+                    logger.warning(f"ไม่สามารถลบไฟล์ชั่วคราว: {e}")
 
-    async def _record_voice(self, duration: int) -> str:
-        """บันทึกเสียงจากช่องเสียง Discord"""
+    async def _check_ffmpeg(self) -> bool:
+        """ตรวจสอบว่า ffmpeg พร้อมใช้งาน"""
         try:
-            from discord import sinks
-            
-            output_file = tempfile.mktemp(suffix=".wav")
-            
-            self.voice_client.start_recording(
-                sinks.WaveSink(),
-                self._recording_callback,
-                output_file
-            )
-            
-            self.is_recording = True
-            await asyncio.sleep(duration)
-            
-            self.voice_client.stop_recording()
-            self.is_recording = False
-            
-            await asyncio.sleep(0.5)
-            
-            return output_file
-            
-        except ImportError:
-            logger.error("ต้องติดตั้ง py-cord สำหรับ recording: pip install py-cord")
-            return None
-        except Exception as e:
-            logger.error(f"Recording error: {e}", exc_info=True)
-            return None
-
-    def _recording_callback(self, sink, output_file):
-        """Callback เมื่อบันทึกเสร็จ"""
-        logger.info(f"Recording saved: {output_file}")
-
-    async def _transcribe_audio(self, audio_file: str) -> str:
-        """ถอดเสียงเป็นข้อความด้วย whisper.cpp"""
-        try:
-            whisper_bin = os.getenv("WHISPER_CPP_BIN_PATH", "whisper.cpp/build/bin/main")
-            whisper_model = os.getenv("WHISPER_CPP_MODEL_PATH", "whisper.cpp/models/ggml-base.bin")
-            lang = os.getenv("WHISPER_CPP_LANG", "th")
-            
-            if not os.path.exists(whisper_bin):
-                logger.error(f"ไม่พบ whisper.cpp: {whisper_bin}")
-                return None
-            
-            cmd = [
-                whisper_bin,
-                "-m", whisper_model,
-                "-l", lang,
-                "-f", audio_file,
-                "--no-timestamps"
-            ]
-            
             result = subprocess.run(
-                cmd,
-                capture_output=True,
+                ["ffmpeg", "-version"], 
+                capture_output=True, 
                 text=True,
-                timeout=30
+                timeout=5.0
             )
-            
             if result.returncode == 0:
-                text = result.stdout.strip()
-                logger.info(f"✅ STT: {text}")
-                return text
+                logger.info("✅ FFmpeg พร้อมใช้งาน")
+                return True
             else:
-                logger.error(f"Whisper error: {result.stderr}")
-                return None
-                
+                logger.error("❌ FFmpeg ไม่พร้อมใช้งาน")
+                return False
+        except FileNotFoundError:
+            logger.error("❌ ไม่พบ FFmpeg ใน PATH")
+            return False
         except Exception as e:
-            logger.error(f"Transcribe error: {e}", exc_info=True)
-            return None
+            logger.error(f"❌ ตรวจสอบ FFmpeg ไม่สำเร็จ: {e}")
+            return False
+
+    async def _play_audio_source(self, audio_source, ctx) -> bool:
+        """เล่น audio source และตรวจสอบว่ามีเสียงออกมาจริงๆ"""
+        if not self.voice_client or not self.voice_client.is_connected():
+            logger.error("Voice client ไม่ได้เชื่อมต่อ")
+            await ctx.send("❌ ไม่ได้เชื่อมต่อช่องเสียง")
+            return False
+        
+        try:
+            # เริ่มเล่น
+            self.voice_client.play(audio_source)
+            
+            # รอให้เริ่มเล่นจริงๆ
+            start_time = time.time()
+            while not self.voice_client.is_playing():
+                if time.time() - start_time > 5.0:
+                    logger.error("Timeout รอการเริ่มเล่นเสียง")
+                    await ctx.send("❌ ไม่สามารถเริ่มเล่นเสียงได้ (timeout)")
+                    return False
+                await asyncio.sleep(0.1)
+            
+            logger.info("🔊 เริ่มเล่นเสียงแล้ว")
+            await ctx.send("🔊 กำลังพูด...")
+            
+            # รอให้เล่นเสร็จ
+            while self.voice_client.is_playing():
+                await asyncio.sleep(0.1)
+            
+            logger.info("✅ เล่นเสียงเสร็จสิ้น")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Audio playback error: {e}", exc_info=True)
+            await ctx.send(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {e}")
+            return False
 
     async def start_bot(self, token: str):
         """เริ่ม Discord bot"""
         try:
+            logger.info("🚀 กำลังเริ่ม Discord bot...")
             await self.start(token)
         except Exception as e:
             logger.error(f"Discord bot error: {e}", exc_info=True)

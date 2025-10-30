@@ -1,5 +1,5 @@
 """
-VTube Studio Client (Fixed .closed check)
+VTube Studio Client (Enhanced)
 """
 import asyncio
 import websockets
@@ -20,48 +20,49 @@ class VTSClient:
         self.ws = None
         self.auth_token = None
         self.is_authenticated = False
+        
         # Discovered parameter names
         self.available_parameters = []
         self.available_input_parameters = []
         self.available_hotkeys = []
-        # Rate limiting และ delta-filter สำหรับการส่งพารามิเตอร์
+        
+        # Rate limiting
         self._last_send_ts = 0.0
-        # ลดการส่งค่าเริ่มต้นลง (80ms ≈ 12.5 FPS) เพื่อเสถียรภาพ
-        self._min_send_interval_sec = float(os.getenv("VTS_SEND_MIN_INTERVAL_MS", "80")) / 1000.0
+        self._min_send_interval_sec = float(os.getenv("VTS_SEND_MIN_INTERVAL_MS", "30")) / 1000.0  # เร็วขึ้น
         self._last_params: Dict[str, float] = {}
-        # ยก threshold ให้สูงขึ้นเพื่อลดการส่งซ้ำ
+        
+        # Threshold สำหรับการส่งพารามิเตอร์
         self._epsilon_map: Dict[str, float] = {
-            "EyeOpenLeft": 0.10,
-            "EyeOpenRight": 0.10,
-            "FacePositionX": 0.30,
-            "FacePositionY": 0.30,
-            "FaceAngleX": 1.5,
-            "FaceAngleY": 1.5,
-            "FaceAngleZ": 1.5,
-            # ลด threshold สำหรับรอยยิ้มให้ส่งได้ลื่นไหล
-            "MouthSmile": 0.05,
-            "ParamEyeLSmile": 0.08,
-            "ParamEyeRSmile": 0.08,
+            "EyeOpenLeft": 0.02,
+            "EyeOpenRight": 0.02,
+            "FacePositionX": 0.05,
+            "FacePositionY": 0.05,
+            "FaceAngleX": 0.1,
+            "FaceAngleY": 0.1,
+            "FaceAngleZ": 0.1,
+            "MouthSmile": 0.01,
+            "ParamEyeLSmile": 0.02,
+            "ParamEyeRSmile": 0.02,
+            # ลด epsilon ของปากเพื่อให้ตามเสียงได้ละเอียดขึ้น
+            "MouthOpen": 0.02,
         }
-        # ตัวแปรสำหรับ adaptive backoff และ suppression
-        self._backoff_factor = 1.0
-        self._suppress_until_ts = 0.0
         
         logger.info(f"VTSClient: {host}:{port}")
 
     def _is_connected(self) -> bool:
-        """✅ ตรวจสอบว่าเชื่อมต่ออยู่หรือไม่"""
+        """ตรวจสอบว่าเชื่อมต่ออยู่หรือไม่"""
         if not self.ws:
             return False
         
-        # ลองใช้ method ต่างๆ ตาม version
-        if hasattr(self.ws, 'closed'):
-            return not self.ws.closed
-        elif hasattr(self.ws, 'close_code'):
-            return self.ws.close_code is None
-        else:
-            # สมมติว่าเชื่อมต่ออยู่
-            return True
+        try:
+            if hasattr(self.ws, 'closed'):
+                return not self.ws.closed
+            elif hasattr(self.ws, 'close_code'):
+                return self.ws.close_code is None
+            else:
+                return True
+        except:
+            return False
 
     async def connect(self):
         """เชื่อมต่อ VTube Studio"""
@@ -79,26 +80,19 @@ class VTSClient:
             )
             
             logger.info("✅ WebSocket connected")
-            # หน่วงให้ฝั่ง VTS พร้อมหลัง reconnect
             await asyncio.sleep(0.5)
-            # รีเซ็ตสถานะ backoff/suppress และค่าเดิม
-            self._backoff_factor = 1.0
-            self._suppress_until_ts = 0.0
-            self._last_params.clear()
-            self._last_send_ts = 0.0
             
             # Authenticate
             await self._authenticate()
             
             if self.is_authenticated:
                 logger.info("✅ VTS เชื่อมต่อและ authenticate สำเร็จ")
+                await self.verify_connection()
+                
+                # ทดสอบส่งค่าพารามิเตอร์เบื้องต้น
+                await self._send_test_parameters()
             else:
                 logger.warning("⚠️ VTS เชื่อมต่อแต่ authenticate ไม่สำเร็จ")
-            # Try to verify and discover parameters/hotkeys
-            try:
-                await self.verify_connection()
-            except Exception:
-                pass
             
         except asyncio.TimeoutError:
             logger.error("❌ VTS connection timeout")
@@ -109,6 +103,20 @@ class VTSClient:
         except Exception as e:
             logger.error(f"❌ VTS connection error: {e}")
             self.ws = None
+
+    async def _send_test_parameters(self):
+        """ส่งค่าพารามิเตอร์ทดสอบเพื่อยืนยันการทำงาน"""
+        try:
+            # ส่งค่าพารามิเตอร์เริ่มต้นเพื่อให้เห็นการขยับ
+            test_params = {
+                self.resolve_param_name("FaceAngleX", "ParamAngleX", "AngleX"): 5.0,
+                self.resolve_param_name("FaceAngleY", "ParamAngleY", "AngleY"): -2.0,
+                self.resolve_param_name("MouthSmile", "ParamMouthSmile", "Smile"): 0.6,
+            }
+            await self.inject_parameters_bulk(test_params)
+            logger.info("✅ ส่งค่าพารามิเตอร์ทดสอบแล้ว")
+        except Exception as e:
+            logger.warning(f"ไม่สามารถส่งค่าทดสอบ: {e}")
 
     async def _authenticate(self):
         """ขอ authentication token"""
@@ -163,11 +171,12 @@ class VTSClient:
             logger.error(f"❌ Authentication error: {e}")
 
     async def verify_connection(self):
-        """Fetch parameter lists and hotkeys to enable name resolution."""
+        """Fetch parameter lists and hotkeys"""
         if not self._is_connected() or not self.is_authenticated:
             return
+            
         try:
-            # Request input parameters (preferred for injection)
+            # Request input parameters
             msg_inputs = {
                 "apiName": "VTubeStudioPublicAPI",
                 "apiVersion": "1.0",
@@ -180,8 +189,10 @@ class VTSClient:
             data_inputs = json.loads(resp_inputs)
             names_inputs = [p.get("name") or p.get("parameterName") or p.get("id") for p in data_inputs.get("data", {}).get("parameters", [])]
             self.available_input_parameters = [n for n in names_inputs if isinstance(n, str)]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ไม่สามารถดึง input parameters: {e}")
             self.available_input_parameters = []
+            
         try:
             # Request model parameters
             msg_params = {
@@ -196,41 +207,19 @@ class VTSClient:
             data_params = json.loads(resp_params)
             names_params = [p.get("name") or p.get("parameterName") or p.get("id") for p in data_params.get("data", {}).get("parameters", [])]
             self.available_parameters = [n for n in names_params if isinstance(n, str)]
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ไม่สามารถดึง model parameters: {e}")
             self.available_parameters = []
-        try:
-            # Request hotkeys
-            msg_hotkeys = {
-                "apiName": "VTubeStudioPublicAPI",
-                "apiVersion": "1.0",
-                "requestID": "hotkeys",
-                "messageType": "HotkeysInCurrentModelRequest",
-                "data": {}
-            }
-            await self.ws.send(json.dumps(msg_hotkeys))
-            resp_hotkeys = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
-            data_hotkeys = json.loads(resp_hotkeys)
-            # Store full info for name-based triggering
-            self.available_hotkeys = [
-                {
-                    "hotkeyID": h.get("hotkeyID"),
-                    "name": h.get("name") or h.get("description")
-                }
-                for h in data_hotkeys.get("data", {}).get("availableHotkeys", [])
-                if isinstance(h.get("hotkeyID"), str)
-            ]
-        except Exception:
-            self.available_hotkeys = []
-        logger.info(f"🎯 พารามิเตอร์ Input: {len(self.available_input_parameters)}, Model: {len(self.available_parameters)}, Hotkeys: {len(self.available_hotkeys)}")
+            
+        logger.info(f"🎯 พารามิเตอร์ Input: {len(self.available_input_parameters)}, Model: {len(self.available_parameters)}")
 
     def resolve_param_name(self, *candidates: str) -> str:
-        """Pick the first existing parameter from inputs, then model params, else fallback."""
+        """Pick the first existing parameter"""
         sets = [set(self.available_input_parameters or []), set(self.available_parameters or [])]
         for name in candidates:
             for s in sets:
                 if name in s:
                     return name
-        # If we don't have discovery, still return the first candidate
         return candidates[0] if candidates else ""
 
     async def disconnect(self):
@@ -249,7 +238,7 @@ class VTSClient:
             msg = {
                 "apiName": "VTubeStudioPublicAPI",
                 "apiVersion": "1.0",
-                "requestID": "inject_param",
+                "requestID": f"inject_{param_name}_{time.time()}",
                 "messageType": "InjectParameterDataRequest",
                 "data": {
                     "parameterValues": [
@@ -265,45 +254,35 @@ class VTSClient:
             
         except Exception as e:
             logger.error(f"Inject parameter error: {e}")
-            # พยายาม reconnect แบบรวดเร็วเมื่อพบปัญหา keepalive/ping timeout
-            try:
-                await self.disconnect()
-                await self.connect()
-            except Exception as re:
-                logger.error(f"Reconnect failed: {re}")
 
     async def inject_parameters_bulk(self, params: Dict[str, float]):
-        """ส่งค่าพารามิเตอร์หลายตัวแบบ batch เพื่อลดจำนวนข้อความที่ส่ง"""
+        """ส่งค่าพารามิเตอร์หลายตัวแบบ batch"""
         if not self._is_connected() or not self.is_authenticated:
             return
 
         try:
             now = time.monotonic()
-            # หยุดส่งชั่วคราวถ้าเพิ่งเกิด timeout
-            if now < self._suppress_until_ts:
-                return
-            # หากส่งถี่เกินไปให้ข้ามเฟรมนี้ เพื่อลดภาระส่ง
-            effective_interval = self._min_send_interval_sec * self._backoff_factor
-            if (now - self._last_send_ts) < effective_interval:
+            
+            # Rate limiting
+            if (now - self._last_send_ts) < self._min_send_interval_sec:
                 return
 
-            # กรองเฉพาะค่าที่เปลี่ยนเกิน threshold เพื่อหลีกเลี่ยงการส่งซ้ำโดยไม่จำเป็น
+            # กรองเฉพาะค่าที่เปลี่ยนเกิน threshold
             filtered_values = []
             for name, value in params.items():
                 last = self._last_params.get(name)
-                eps = self._epsilon_map.get(name, 0.5)
+                eps = self._epsilon_map.get(name, 0.05)
                 if last is None or abs(float(value) - float(last)) >= eps:
                     filtered_values.append({"id": name, "value": float(value)})
                     self._last_params[name] = float(value)
 
-            # หากไม่มีค่าที่เปลี่ยนจริง ๆ ก็ไม่ต้องส่ง
             if not filtered_values:
                 return
 
             payload = {
                 "apiName": "VTubeStudioPublicAPI",
                 "apiVersion": "1.0",
-                "requestID": "inject_params_batch",
+                "requestID": f"inject_batch_{time.time()}",
                 "messageType": "InjectParameterDataRequest",
                 "data": {
                     "parameterValues": filtered_values
@@ -315,15 +294,6 @@ class VTSClient:
 
         except Exception as e:
             logger.error(f"Inject parameters bulk error: {e}")
-            # เพิ่ม backoff และกด suppression ชั่วคราวเพื่อให้ VTS ฟื้นตัว
-            self._backoff_factor = min(self._backoff_factor * 1.5, 4.0)
-            self._suppress_until_ts = time.monotonic() + 1.0
-            await asyncio.sleep(0.5)
-            try:
-                await self.disconnect()
-                await self.connect()
-            except Exception as re:
-                logger.error(f"Reconnect failed: {re}")
 
     async def trigger_hotkey(self, hotkey_id: str):
         """Trigger hotkey"""
@@ -334,7 +304,7 @@ class VTSClient:
             msg = {
                 "apiName": "VTubeStudioPublicAPI",
                 "apiVersion": "1.0",
-                "requestID": "trigger_hotkey",
+                "requestID": f"hotkey_{time.time()}",
                 "messageType": "HotkeyTriggerRequest",
                 "data": {
                     "hotkeyID": hotkey_id
@@ -348,21 +318,27 @@ class VTSClient:
             logger.error(f"Trigger hotkey error: {e}")
 
     async def trigger_hotkey_by_name(self, substrings):
-        """Trigger first hotkey whose name contains any of substrings (case-insensitive)."""
+        """Trigger first hotkey whose name contains any of substrings"""
         if not self._is_connected() or not self.is_authenticated:
             return False
+            
         try:
             if not self.available_hotkeys:
                 await self.verify_connection()
+                
             subs = [s.lower() for s in (substrings or [])]
             for hk in (self.available_hotkeys or []):
                 name = (hk.get("name") or "").lower()
                 if any(s in name for s in subs):
                     await self.trigger_hotkey(hk.get("hotkeyID"))
                     return True
-        except Exception:
-            pass
-        return False
+                    
+            logger.warning(f"ไม่พบ hotkey ที่มีคำว่า: {substrings}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Trigger hotkey by name error: {e}")
+            return False
 
     async def lipsync_bytes(self, audio_bytes: bytes):
         """
@@ -375,83 +351,104 @@ class VTSClient:
         try:
             import io
             import wave
+            import numpy as np
             
-            # อ่าน WAV header
+            # อ่าน WAV header เพื่อหาความยาว
             wav_io = io.BytesIO(audio_bytes)
             with wave.open(wav_io, 'rb') as wav:
                 sample_rate = wav.getframerate()
                 n_frames = wav.getnframes()
-                audio_data = wav.readframes(n_frames)
+                sampwidth = wav.getsampwidth()
+                n_channels = wav.getnchannels()
+                frames = wav.readframes(n_frames)
                 duration = n_frames / sample_rate
             
             logger.info(f"🎤 Lipsync: {duration:.2f}s, {sample_rate}Hz")
             
-            # จำลองลิปซิงก์แบบง่าย (sine wave)
+            # ใช้พารามิเตอร์ปาก
             mouth_param = self.resolve_param_name("MouthOpen", "ParamMouthOpen", "MouthOpenY")
-            steps = int(duration * 20)  # 20 FPS
-            for i in range(steps):
-                t = i / 20.0
-                
-                # Mouth open based on sine wave
-                mouth_value = abs(np.sin(t * 10.0)) * 0.8
-                
-                await self.inject_parameter(mouth_param, mouth_value)
-                await asyncio.sleep(0.05)
             
-            # ปิดปาก
-            await self.inject_parameter(mouth_param, 0.0)
+            # แปลงเป็น mono float [-1,1]
+            try:
+                if sampwidth == 2:
+                    data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                elif sampwidth == 4:
+                    # torchaudio มักบันทึกเป็น float32 PCM
+                    data = np.frombuffer(frames, dtype=np.float32)
+                    # เผื่อกรณีเป็น int32
+                    if data.max() > 1.5 or data.min() < -1.5:
+                        data = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / (2**31)
+                elif sampwidth == 1:
+                    data = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+                else:
+                    # fallback
+                    data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                if n_channels and n_channels > 1:
+                    try:
+                        data = data.reshape(-1, n_channels).mean(axis=1)
+                    except Exception:
+                        # ถ้า reshape ไม่ได้ ให้เดาว่า interleaved และเฉลี่ยแบบ step
+                        data = data[::n_channels]
+                mono = np.clip(data, -1.0, 1.0)
+            except Exception as e:
+                logger.warning(f"วิเคราะห์ WAV ไม่สำเร็จ ใช้ลิปซิงก์แบบพื้นฐานแทน: {e}")
+                mono = None
+
+            # ถ้ามีสัญญาณ mono ให้ทำลิปซิงก์ตามพลังเสียง
+            if mono is not None and len(mono) > sample_rate * 0.1:
+                # ตั้งค่าเฟรมเรตของลิปซิงก์ให้สอดคล้องกับ rate limit
+                target_fps = max(10, int(1.0 / max(self._min_send_interval_sec, 0.03)))
+                hop = max(1, int(sample_rate / target_fps))
+                window = max(hop, int(sample_rate * 0.03))  # ~30–50ms
+
+                # คำนวณ RMS แบบสไลด์
+                # ป้องกันค่า NaN
+                mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
+                global_rms = float(np.sqrt(np.mean(mono**2)) + 1e-6)
+
+                # เตรียม smoothing
+                mouth = 0.0
+                attack = 0.7
+                release = 0.35
+
+                # วิ่งทีละ hop ก้อน
+                idx = 0
+                while idx + window <= len(mono):
+                    seg = mono[idx:idx+window]
+                    rms = float(np.sqrt(np.mean(seg**2)))
+                    # ทำ normalization เทียบกับ global RMS เพื่อให้เปิดปากตามสัมพัทธ์ของเสียง
+                    rnorm = min(2.0, rms / global_rms)
+                    target = max(0.0, min(1.0, 0.05 + 0.85 * (rnorm / 2.0)))
+                    # smoothing attack/release
+                    alpha = attack if target > mouth else release
+                    mouth = mouth + (target - mouth) * alpha
+                    # ส่งค่า
+                    await self.inject_parameter(mouth_param, mouth)
+                    # เคารพ rate limit
+                    await asyncio.sleep(max(self._min_send_interval_sec, 0.03))
+                    idx += hop
+
+                # ปิดปากอย่างนุ่มนวลหลังจบ
+                for _ in range(3):
+                    mouth = mouth + (0.0 - mouth) * 0.5
+                    await self.inject_parameter(mouth_param, mouth)
+                    await asyncio.sleep(max(self._min_send_interval_sec, 0.03))
+                await self.inject_parameter(mouth_param, 0.0)
+            else:
+                # Fallback: หากอ่าน audio ไม่ได้ ใช้ animation พื้นฐาน
+                steps = int(duration * 15)  # 15 FPS
+                for i in range(steps):
+                    t = i / 15.0
+                    base_move = abs(math.sin(t * 8.0 + random.uniform(-0.5, 0.5)))
+                    mouth_value = base_move * 0.7
+                    await self.inject_parameter(mouth_param, mouth_value)
+                    await asyncio.sleep(0.067)
+                await self.inject_parameter(mouth_param, 0.0)
             
             logger.info("✅ Lipsync เสร็จสิ้น")
             
         except Exception as e:
             logger.error(f"Lipsync error: {e}", exc_info=True)
 
-    async def kickstart_motion_and_smile(self):
-        """บังคับฉีดค่าพารามิเตอร์ให้เห็นการขยับและรอยยิ้มทันที ถ้าเป็นไปได้"""
-        if not self._is_connected() or not self.is_authenticated:
-            logger.warning("VTS ไม่ได้เชื่อมต่อหรือยังไม่ authenticated — ข้าม kickstart")
-            return
-        try:
-            # ค้นหาชื่อพารามิเตอร์ที่เกี่ยวกับการขยับศีรษะ/ลำตัว
-            angle_x = self.resolve_param_name("AngleX", "FaceAngleX", "ParamAngleX", "HeadX", "RotX")
-            angle_y = self.resolve_param_name("AngleY", "FaceAngleY", "ParamAngleY", "HeadY", "RotY")
-            angle_z = self.resolve_param_name("AngleZ", "FaceAngleZ", "ParamAngleZ", "HeadZ", "RotZ")
-            pos_x = self.resolve_param_name("PosX", "FacePositionX", "ParamPositionX", "PositionX", "BodyX")
-            pos_y = self.resolve_param_name("PosY", "FacePositionY", "ParamPositionY", "PositionY", "BodyY")
-
-            # ค้นหายิ้ม
-            mouth_smile = self.resolve_param_name("MouthSmile", "Smile", "MouthHappy", "ParamMouthSmile")
-            eye_smile_l = self.resolve_param_name("EyeSmileL", "EyeSmileLeft", "ParamEyeSmileLeft", "ParamEyeLSmile")
-            eye_smile_r = self.resolve_param_name("EyeSmileR", "EyeSmileRight", "ParamEyeSmileRight", "ParamEyeRSmile")
-
-            payload = {}
-            # ใส่ค่าขยับเล็กน้อยให้เห็นการเปลี่ยนแปลง
-            if angle_x:
-                payload[angle_x] = 10.0
-            if angle_y:
-                payload[angle_y] = -5.0
-            if angle_z:
-                payload[angle_z] = 8.0
-            if pos_x:
-                payload[pos_x] = 0.2
-            if pos_y:
-                payload[pos_y] = -0.15
-
-            # ใส่ค่ารอยยิ้ม
-            if mouth_smile:
-                payload[mouth_smile] = 0.75
-            if eye_smile_l:
-                payload[eye_smile_l] = 0.6
-            if eye_smile_r:
-                payload[eye_smile_r] = 0.6
-
-            if payload:
-                await self.inject_parameters_bulk(payload)
-                logger.info("🚀 Kickstart motion/smile injected")
-            else:
-                # ถ้าไม่มีพารามิเตอร์ยิ้ม ให้ลองใช้ฮ็อตคีย์ยิ้มแทน
-                ok = await self.trigger_hotkey_by_name(["smile", "happy", "ยิ้ม"])  # รองรับไทยด้วย
-                if ok:
-                    logger.info("😊 Kickstart ด้วย hotkey สำเร็จ")
-        except Exception as e:
-            logger.error(f"Kickstart motion/smile error: {e}")
+# เพิ่ม import math ที่ขาดไป
+import math
