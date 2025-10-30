@@ -1,17 +1,16 @@
 """
-AI VTuber Orchestrator
+AI VTuber Orchestrator (Fixed Import Paths)
 """
-# Bootstrap sys.path so running this file directly can import the 'src' package
-import sys as _sys
-from pathlib import Path as _Path
-_proj_root = _Path(__file__).resolve().parents[1]
-_root_str = str(_proj_root)
-if _root_str not in _sys.path:
-    _sys.path.insert(0, _root_str)
 import os
+import sys
 import asyncio
 import logging
+from pathlib import Path
 from dotenv import load_dotenv
+
+# ✅ เพิ่ม project root ลง sys.path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 load_dotenv()
 
@@ -39,6 +38,7 @@ class AIVTuberOrchestrator:
     def _initialize_components(self):
         """สร้าง components ทั้งหมด"""
         try:
+            # ✅ แก้ไข: ใช้ absolute import หลังจากเพิ่ม sys.path
             from src.core.scheduler import PriorityScheduler
             self.scheduler = PriorityScheduler()
             logger.info("✅ Scheduler สร้างแล้ว")
@@ -61,12 +61,10 @@ class AIVTuberOrchestrator:
             vts_port = int(os.getenv("VTS_PORT", "8001"))
             vts_plugin = os.getenv("VTS_PLUGIN_NAME", "AI_VTuber_Plugin")
             
-            # ใช้ keyword ให้ตรงกับ signature: (plugin_name, plugin_developer, host, port, config)
             self.vts = VTSClient(
-                plugin_name=vts_plugin,
-                plugin_developer="AI VTuber",
                 host=vts_host,
                 port=vts_port,
+                plugin_name=vts_plugin
             )
             logger.info("✅ VTS Client สร้างแล้ว")
             
@@ -115,8 +113,10 @@ class AIVTuberOrchestrator:
             logger.info("📡 กำลังเชื่อมต่อ VTS...")
             await self.vts.connect()
             
-            if not self.vts.ws or self.vts.ws.closed:
+            # ✅ ใช้ method _is_connected() แทน
+            if not self.vts._is_connected():
                 logger.warning("⚠️ ไม่สามารถเชื่อมต่อ VTS")
+                logger.warning("   ตรวจสอบ: VTube Studio เปิดอยู่และ API enabled (port 8001)")
             else:
                 logger.info("🎭 เริ่ม Motion Controller...")
                 await self.motion.start()

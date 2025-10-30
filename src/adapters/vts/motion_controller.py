@@ -1,97 +1,28 @@
 """
 VTS Motion Controller - Neuro-sama Style
-
-Also provides a minimal VTSHumanMotionController stub so that
-vts_client and test scripts can import it without errors.
-This stub does not perform real WebSocket calls; it exposes
-the expected interface for compatibility.
+✨ การเคลื่อนไหวแบบสุ่ม มีชีวิตชีวา ไม่ซ้ำซาก
 """
 import asyncio
 import random
 import math
 import time
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class _DummyWS:
-    def __init__(self):
-        self.closed = False
-
-class VTSHumanMotionController:
-    """
-    Minimal stub to satisfy imports and orchestrator expectations.
-    Provides connect/authenticate/disconnect, parameter mapping,
-    and simple set_parameters interface. No real VTS API calls.
-    """
-    def __init__(
-        self,
-        plugin_name: str = "AI VTuber",
-        plugin_developer: str = "AI VTuber",
-        host: str = "127.0.0.1",
-        port: int = 8001,
-    ) -> None:
-        self.plugin_name = plugin_name
-        self.plugin_developer = plugin_developer
-        self.host = host
-        self.port = port
-        self.ws: Optional[_DummyWS] = None
-        self.authenticated: bool = False
-        self.param_map: Dict[str, str] = {}
-        self.enable_mic: bool = False
-        # State used by motion/lipsync
-        self.speech_target: float = 0.0
-        self.speaking: bool = False
-
-    async def connect(self):
-        # Simulate a connected websocket
-        self.ws = _DummyWS()
-        logger.info("✅ VTSHumanMotionController: connected (stub)")
-
-    async def authenticate(self) -> bool:
-        # Simulate successful authentication
-        self.authenticated = True
-        logger.info("✅ VTSHumanMotionController: authenticated (stub)")
-        return True
-
-    async def disconnect(self):
-        if self.ws:
-            self.ws.closed = True
-        self.ws = None
-        self.authenticated = False
-        logger.info("⏹️ VTSHumanMotionController: disconnected (stub)")
-
-    async def _resolve_param_map(self):
-        # Map common parameter names to themselves for simplicity
-        names = [
-            "MouthOpen", "MouthSmile",
-            "FaceAngleX", "FaceAngleY", "FaceAngleZ",
-            "FacePositionX", "FacePositionY",
-            "EyeOpenLeft", "EyeOpenRight",
-        ]
-        self.param_map = {n: n for n in names}
-        logger.info("🔧 Resolved %d parameters (stub)", len(self.param_map))
-
-    async def set_parameters(self, values: Dict[str, float], weight: float = 1.0):
-        # No-op; log for visibility
-        try:
-            logger.debug("[VTS Stub] set_parameters: %s (w=%.2f)", values, weight)
-        except Exception:
-            pass
-
-    async def trigger_hotkey(self, name: str):
-        # No-op; log only
-        logger.debug("[VTS Stub] trigger_hotkey: %s", name)
-
-    async def run(self):
-        """Background loop placeholder for human-like motion (stub)."""
-        try:
-            while self.ws and not self.ws.closed:
-                # Just keep alive; real motion loop is implemented in MotionController
-                await asyncio.sleep(0.5)
-        except asyncio.CancelledError:
-            pass
+@dataclass
+class MotionAction:
+    """การกระทำการเคลื่อนไหวหนึ่งอัน"""
+    name: str
+    duration: float
+    head_x: float = 0.0
+    head_y: float = 0.0
+    head_z: float = 0.0
+    body_x: float = 0.0
+    body_y: float = 0.0
+    intensity: float = 1.0
 
 class MotionController:
     def __init__(self, vts_client, config: dict):
@@ -103,28 +34,177 @@ class MotionController:
         self.motion_task = None
         self.should_stop = False
         
-        self.time_offset = 0.0
-        self.breath_time = 0.0
-        self.blink_timer = time.time()
-        
+        # State
         self.current_head_x = 0.0
         self.current_head_y = 0.0
         self.current_head_z = 0.0
-        self.target_head_x = 0.0
-        self.target_head_y = 0.0
-        self.target_head_z = 0.0
-        
         self.current_body_x = 0.0
         self.current_body_y = 0.0
-        self.target_body_x = 0.0
-        self.target_body_y = 0.0
         
-        self.smoothing = float(config.get("smoothing", 0.85))
-        self.intensity = float(config.get("intensity", 0.4))
-        self.idle_intensity = float(config.get("idle_head_intensity", 0.15))
-        self.idle_breath = float(config.get("idle_breath_intensity", 0.25))
+        # Timers
+        self.breath_time = 0.0
+        self.blink_timer = time.time()
+        self.action_timer = time.time()
+        self.next_action_time = time.time()
+        self.current_action: Optional[MotionAction] = None
+        self.action_progress = 0.0
         
-        logger.info(f"✅ Motion Controller: smooth={self.smoothing}, intensity={self.intensity}")
+        # Config
+        # เพิ่มความสมูทเริ่มต้นให้สูงขึ้น ลดอาการสั่น
+        self.smoothing = float(config.get("smoothing", 0.96))
+        self.intensity = float(config.get("intensity", 1.0))
+        # อัตราอัพเดท (dt) ค่าเริ่มต้น 0.05 (~20 FPS) เพื่อความเสถียร
+        self.update_dt = float(config.get("update_dt", 0.05))
+        # การหายใจ (รองรับ override จาก .env ผ่าน config)
+        self.breath_speed = float(config.get("VTS_BREATH_SPEED", 0.8))
+        self.breath_intensity = float(config.get("VTS_BREATH_INTENSITY", 0.3))
+        self.breath_value = 0.0
+        # การควบคุมความถี่การสุ่มท่าทาง
+        self.action_duration_scale = float(config.get("action_duration_scale", 1.15))
+        self.action_rest_min_sec = float(config.get("action_rest_min_sec", 0.6))
+        self.action_rest_max_sec = float(config.get("action_rest_max_sec", 1.2))
+        self.idle_hold_prob = float(config.get("idle_hold_prob", 0.35))
+        
+        # ✨ สร้างชุดท่าทางแบบ Neuro-sama
+        self.action_pool = self._create_action_pool()
+        # ปรับ duration ให้ยาวขึ้นเพื่อให้สุ่มท่าถี่น้อยลง
+        for a in self.action_pool:
+            a.duration = max(0.2, a.duration * self.action_duration_scale)
+        # กลุ่ม idle สำหรับ bias
+        self.idle_actions = [a for a in self.action_pool if a.name.startswith("idle_") or "idle" in a.name]
+        
+        logger.info(f"✅ Neuro Motion: {len(self.action_pool)} actions, intensity={self.intensity}, duration_scale={self.action_duration_scale}")
+
+    def _create_action_pool(self) -> List[MotionAction]:
+        """
+        สร้างชุดท่าทางต่างๆ แบบ Neuro-sama
+        🎭 มีท่าพิเศษเยอะๆ ไม่ซ้ำซาก
+        """
+        actions = []
+        
+        # === 1. Head Tilts (เอียงหัว) ===
+        actions.extend([
+            MotionAction("tilt_right", 1.5, head_z=0.8, intensity=0.8),
+            MotionAction("tilt_left", 1.5, head_z=-0.8, intensity=0.8),
+            MotionAction("tilt_right_strong", 1.2, head_z=1.2, head_y=0.3, intensity=1.2),
+            MotionAction("tilt_left_strong", 1.2, head_z=-1.2, head_y=-0.3, intensity=1.2),
+        ])
+        
+        # === 2. Head Nods (พยักหน้า/ส่ายหน้า) ===
+        actions.extend([
+            MotionAction("nod_yes", 1.0, head_y=0.6, intensity=0.9),
+            MotionAction("nod_no", 1.2, head_x=0.8, intensity=0.9),
+            MotionAction("nod_confused", 1.5, head_x=0.5, head_z=0.4, intensity=0.7),
+        ])
+        
+        # === 3. Look Around (มองไปรอบๆ) ===
+        actions.extend([
+            MotionAction("look_right", 1.8, head_x=1.0, head_y=0.2, intensity=1.0),
+            MotionAction("look_left", 1.8, head_x=-1.0, head_y=0.2, intensity=1.0),
+            MotionAction("look_up", 1.5, head_y=0.8, intensity=0.8),
+            MotionAction("look_down", 1.5, head_y=-0.5, intensity=0.6),
+            MotionAction("look_up_right", 2.0, head_x=0.7, head_y=0.6, intensity=0.9),
+            MotionAction("look_up_left", 2.0, head_x=-0.7, head_y=0.6, intensity=0.9),
+        ])
+        
+        # === 4. Thinking Poses (ท่าคิด) ===
+        actions.extend([
+            MotionAction("thinking_right", 2.5, head_x=0.5, head_z=0.3, head_y=-0.2, intensity=0.7),
+            MotionAction("thinking_left", 2.5, head_x=-0.5, head_z=-0.3, head_y=-0.2, intensity=0.7),
+            MotionAction("thinking_up", 2.0, head_y=0.4, head_z=0.2, intensity=0.6),
+        ])
+        
+        # === 5. Surprised/Excited (ตกใจ/ตื่นเต้น) ===
+        actions.extend([
+            MotionAction("surprised", 0.8, head_y=0.5, body_y=0.3, intensity=1.5),
+            MotionAction("excited_bounce", 1.0, head_y=0.4, body_y=0.5, intensity=1.8),
+            MotionAction("shocked", 0.6, head_x=0.3, head_y=0.4, intensity=1.6),
+        ])
+        
+        # === 6. Curious (สงสัย/อยากรู้) ===
+        actions.extend([
+            MotionAction("curious_tilt", 2.0, head_z=0.6, head_x=0.3, intensity=0.8),
+            MotionAction("curious_lean", 2.2, head_x=0.4, body_x=0.3, intensity=0.9),
+            MotionAction("peek_right", 1.5, head_x=0.8, body_x=0.4, intensity=1.0),
+            MotionAction("peek_left", 1.5, head_x=-0.8, body_x=-0.4, intensity=1.0),
+        ])
+        
+        # === 7. Playful (ขี้เล่น) ===
+        actions.extend([
+            MotionAction("playful_wiggle", 1.2, head_z=0.5, body_x=0.2, intensity=1.1),
+            MotionAction("cheeky_smile", 1.5, head_z=0.4, head_y=0.2, intensity=0.9),
+            MotionAction("teasing", 1.8, head_x=0.5, head_z=-0.3, intensity=1.0),
+        ])
+        
+        # === 8. Confident (มั่นใจ) ===
+        actions.extend([
+            MotionAction("confident_up", 2.0, head_y=0.3, body_y=0.2, intensity=0.8),
+            MotionAction("proud", 2.5, head_y=0.4, head_z=0.1, intensity=0.9),
+        ])
+        
+        # === 9. Shy/Embarrassed (อาย) ===
+        actions.extend([
+            MotionAction("shy_down", 2.0, head_y=-0.4, head_z=0.2, intensity=0.6),
+            MotionAction("embarrassed", 1.8, head_x=0.3, head_y=-0.3, head_z=0.4, intensity=0.7),
+        ])
+        
+        # === 10. Idle Variations (ท่าพักธรรมดา แต่หลากหลาย) ===
+        actions.extend([
+            MotionAction("idle_center", 3.0, head_x=0.0, head_y=0.0, head_z=0.0, intensity=0.5),
+            MotionAction("idle_slight_right", 2.5, head_x=0.2, head_z=0.1, intensity=0.5),
+            MotionAction("idle_slight_left", 2.5, head_x=-0.2, head_z=-0.1, intensity=0.5),
+            MotionAction("idle_relaxed", 3.5, head_y=-0.1, head_z=0.05, intensity=0.4),
+        ])
+        
+        # === 11. Special Actions (ท่าพิเศษ) ===
+        actions.extend([
+            MotionAction("head_shake_fast", 0.8, head_x=0.9, intensity=1.8),
+            MotionAction("big_nod", 1.0, head_y=0.8, intensity=1.5),
+            MotionAction("lean_forward", 2.0, head_y=-0.3, body_y=-0.2, intensity=1.0),
+            MotionAction("lean_back", 2.0, head_y=0.3, body_y=0.2, intensity=1.0),
+        ])
+
+        # === 12. Slow Pans & Arcs (เคลื่อนช้า เนียน) ===
+        actions.extend([
+            MotionAction("pan_left_slow", 2.6, head_x=-0.6, head_y=0.1, intensity=0.7),
+            MotionAction("pan_right_slow", 2.6, head_x=0.6, head_y=0.1, intensity=0.7),
+            MotionAction("arc_up_left", 2.4, head_x=-0.4, head_y=0.5, intensity=0.7),
+            MotionAction("arc_up_right", 2.4, head_x=0.4, head_y=0.5, intensity=0.7),
+            MotionAction("arc_down_left", 2.4, head_x=-0.4, head_y=-0.4, intensity=0.6),
+            MotionAction("arc_down_right", 2.4, head_x=0.4, head_y=-0.4, intensity=0.6),
+        ])
+
+        # === 13. Figure Eight & Circles (รูปเลขแปด/วงกลม) ===
+        actions.extend([
+            MotionAction("figure8_small", 3.0, head_x=0.5, head_y=0.4, intensity=0.6),
+            MotionAction("figure8_wide", 3.4, head_x=0.7, head_y=0.5, intensity=0.7),
+            MotionAction("head_circle_cw", 3.2, head_x=0.5, head_y=0.5, intensity=0.6),
+            MotionAction("head_circle_ccw", 3.2, head_x=-0.5, head_y=0.5, intensity=0.6),
+        ])
+
+        # === 14. Sways & Bounces (แกว่ง/ย่อ) ===
+        actions.extend([
+            MotionAction("sway_x_soft", 2.4, head_x=0.6, intensity=0.7),
+            MotionAction("sway_y_soft", 2.4, head_y=0.6, intensity=0.7),
+            MotionAction("sway_z_soft", 2.4, head_z=0.6, intensity=0.7),
+            MotionAction("bounce_soft", 2.0, head_y=0.4, body_y=0.4, intensity=0.6),
+        ])
+
+        # === 15. Diagonal Tilts & Looks (เอียงแนวทแยง) ===
+        actions.extend([
+            MotionAction("tilt_look_up_left", 2.2, head_x=-0.5, head_y=0.4, head_z=0.4, intensity=0.7),
+            MotionAction("tilt_look_up_right", 2.2, head_x=0.5, head_y=0.4, head_z=-0.4, intensity=0.7),
+            MotionAction("tilt_look_down_left", 2.2, head_x=-0.4, head_y=-0.4, head_z=0.4, intensity=0.6),
+            MotionAction("tilt_look_down_right", 2.2, head_x=0.4, head_y=-0.4, head_z=-0.4, intensity=0.6),
+        ])
+
+        # === 16. Idle Holds (ท่าพักยาวๆ เบามาก) ===
+        actions.extend([
+            MotionAction("idle_hold_soft", 3.8, head_x=0.1, head_y=0.05, intensity=0.4),
+            MotionAction("idle_hold_focus", 3.6, head_x=0.1, head_y=0.1, intensity=0.45),
+        ])
+        
+        return actions
 
     async def start(self):
         """เริ่ม motion loop"""
@@ -134,7 +214,7 @@ class MotionController:
         
         self.should_stop = False
         self.motion_task = asyncio.create_task(self._motion_loop())
-        logger.info("🎬 Motion loop เริ่มทำงาน")
+        logger.info("🎬 Neuro Motion เริ่มทำงาน")
 
     async def stop(self):
         """หยุด motion loop"""
@@ -142,176 +222,220 @@ class MotionController:
         if self.motion_task:
             try:
                 await asyncio.wait_for(self.motion_task, timeout=2.0)
-            except asyncio.TimeoutError:
-                logger.warning("Motion loop timeout")
+            except:
+                pass
             self.motion_task = None
         logger.info("⏹️ Motion loop หยุดแล้ว")
 
     def set_speaking(self, speaking: bool):
-        """ตั้งสถานะกำลังพูด"""
         self.is_speaking = speaking
-        if speaking:
-            logger.debug("🗣️ เริ่มพูด")
-        else:
-            logger.debug("🤐 พูดเสร็จ")
 
     def set_generating(self, generating: bool):
-        """ตั้งสถานะกำลังเจนเสียง"""
         self.is_generating = generating
-        if generating:
-            logger.debug("⚙️ กำลังเจนเสียง - เริ่ม idle animation")
-        else:
-            logger.debug("✅ เจนเสียงเสร็จ")
 
     async def _motion_loop(self):
         """
-        Main motion loop
+        Main motion loop - Neuro-sama Style
+        ✨ สุ่มท่าทางใหม่ทุกครั้ง ไม่ซ้ำซาก
         """
-        logger.info("🎭 Motion loop เริ่มต้น")
+        logger.info("🎭 Neuro Motion Loop เริ่มต้น")
         
         while not self.should_stop:
             try:
-                dt = 0.05
+                if not self.vts._is_connected():
+                    await asyncio.sleep(1.0)
+                    continue
                 
-                self.time_offset += dt * 0.5
+                dt = self.update_dt  # ~30 FPS
                 self.breath_time += dt
                 
-                if self.is_generating:
-                    await self._update_idle_animation(dt)
-                elif not self.is_speaking:
-                    await self._update_natural_movement(dt)
-                else:
-                    await self._update_speaking_animation(dt)
+                # === เลือกท่าทางใหม่ด้วยช่วงพัก ===
+                if self.current_action is not None and self.action_progress >= 1.0:
+                    self.current_action = None
+                    self.action_progress = 0.0
+                    self.next_action_time = time.time() + random.uniform(self.action_rest_min_sec, self.action_rest_max_sec)
+
+                if self.current_action is None and time.time() >= self.next_action_time:
+                    if random.random() < self.idle_hold_prob and self.idle_actions:
+                        self.current_action = random.choice(self.idle_actions)
+                        self.action_progress = 0.0
+                        self.action_timer = time.time()
+                    else:
+                        self._pick_random_action()
                 
+                # === อัพเดทการเคลื่อนไหว ===
+                await self._update_action(dt)
+                
+                # === Breathing + Blinking (ทำตลอด) ===
                 await self._update_breathing()
                 await self._update_blinking()
                 
                 await asyncio.sleep(dt)
                 
             except Exception as e:
-                logger.error(f"Motion loop error: {e}", exc_info=True)
-                await asyncio.sleep(0.1)
+                logger.error(f"Motion error: {e}")
+                await asyncio.sleep(0.5)
         
         logger.info("🛑 Motion loop หยุด")
 
-    async def _update_idle_animation(self, dt: float):
-        """Idle Animation: เคลื่อนไหวเบาๆ ตอนกำลังเจนเสียง"""
-        idle_wave = math.sin(self.time_offset * 0.8) * self.idle_intensity
+    def _pick_random_action(self):
+        """
+        สุ่มเลือกท่าทางใหม่
+        🎲 มีน้ำหนักตามสถานะ (speaking, generating, idle)
+        """
+        # กำหนดน้ำหนักตามสถานะ
+        if self.is_speaking:
+            # ตอนพูด: ชอบท่าที่มีพลังมากกว่า
+            weights = [
+                (a, a.intensity * 1.5) if a.intensity > 1.0 else (a, a.intensity * 0.5)
+                for a in self.action_pool
+            ]
+        elif self.is_generating:
+            # ตอนเจนเสียง: ชอบท่าคิด/idle
+            weights = [
+                (a, 2.0) if "thinking" in a.name or "idle" in a.name else (a, 0.5)
+                for a in self.action_pool
+            ]
+        else:
+            # ปกติ: สุ่มทุกท่า
+            weights = [(a, 1.0) for a in self.action_pool]
         
-        self.target_head_x = idle_wave * 0.5
-        self.target_head_y = math.cos(self.time_offset * 0.6) * self.idle_intensity * 0.3
-        self.target_head_z = idle_wave * 0.3
+        # สุ่มเลือก
+        actions, probs = zip(*weights)
+        total = sum(probs)
+        normalized_probs = [p / total for p in probs]
         
-        self.target_body_x = math.sin(self.time_offset * 0.5) * self.idle_intensity * 0.4
+        self.current_action = random.choices(actions, weights=normalized_probs)[0]
+        self.action_progress = 0.0
+        self.action_timer = time.time()
         
-        await self._smooth_update(dt)
+        logger.debug(f"🎭 Action: {self.current_action.name} ({self.current_action.duration}s)")
 
-    async def _update_natural_movement(self, dt: float):
-        """Natural Movement: เคลื่อนไหวแบบธรรมชาติ"""
-        noise_x = math.sin(self.time_offset * 1.2) * math.cos(self.time_offset * 0.7)
-        noise_y = math.cos(self.time_offset * 0.9) * math.sin(self.time_offset * 1.1)
-        noise_z = math.sin(self.time_offset * 0.8) * math.cos(self.time_offset * 1.3)
+    async def _update_action(self, dt: float):
+        """
+        อัพเดทท่าทางปัจจุบัน
+        """
+        if not self.current_action:
+            return
         
-        self.target_head_x = noise_x * self.intensity * 0.6
-        self.target_head_y = noise_y * self.intensity * 0.4
-        self.target_head_z = noise_z * self.intensity * 0.5
+        # คำนวณ progress (0.0 → 1.0)
+        self.action_progress += dt / self.current_action.duration
+        self.action_progress = min(self.action_progress, 1.0)
         
-        self.target_body_x = math.sin(self.time_offset * 0.6) * self.intensity * 0.3
-        self.target_body_y = math.cos(self.time_offset * 0.5) * self.intensity * 0.2
+        # Easing function (ทำให้การเคลื่อนไหวนุ่มนวล)
+        t = self.action_progress
         
-        if random.random() < 0.01:
-            self.target_head_x += random.uniform(-0.1, 0.1)
-            self.target_head_y += random.uniform(-0.05, 0.05)
+        # Ease in-out cubic
+        if t < 0.5:
+            eased = 4 * t * t * t
+        else:
+            eased = 1 - pow(-2 * t + 2, 3) / 2
         
-        await self._smooth_update(dt)
-
-    async def _update_speaking_animation(self, dt: float):
-        """Speaking Animation: เคลื่อนไหวตอนพูด"""
-        bob_intensity = 0.4
-        talk_speed = 2.0
+        # คำนวณ target position
+        action = self.current_action
+        intensity_multiplier = action.intensity * self.intensity
         
-        bob_x = math.sin(self.time_offset * talk_speed) * bob_intensity
-        bob_y = abs(math.cos(self.time_offset * talk_speed * 0.8)) * bob_intensity * 0.5
+        target_head_x = action.head_x * eased * intensity_multiplier
+        target_head_y = action.head_y * eased * intensity_multiplier
+        target_head_z = action.head_z * eased * intensity_multiplier
+        target_body_x = action.body_x * eased * intensity_multiplier
+        target_body_y = action.body_y * eased * intensity_multiplier
         
-        self.target_head_x = bob_x * 0.3
-        self.target_head_y = bob_y * 0.2
-        self.target_head_z = math.sin(self.time_offset * talk_speed * 0.6) * 0.15
+        # เพิ่ม subtle noise (ลดลงเพื่อความนิ่ง)
+        noise_factor = 0.01
+        target_head_x += math.sin(self.breath_time * 3.7) * noise_factor
+        target_head_y += math.cos(self.breath_time * 2.9) * noise_factor
+        target_head_z += math.sin(self.breath_time * 4.1) * noise_factor
         
-        await self._smooth_update(dt)
-
-    async def _smooth_update(self, dt: float):
-        """Smooth Interpolation"""
+        # Smooth interpolation
         alpha = 1.0 - self.smoothing
         
-        self.current_head_x += (self.target_head_x - self.current_head_x) * alpha
-        self.current_head_y += (self.target_head_y - self.current_head_y) * alpha
-        self.current_head_z += (self.target_head_z - self.current_head_z) * alpha
+        self.current_head_x += (target_head_x - self.current_head_x) * alpha
+        self.current_head_y += (target_head_y - self.current_head_y) * alpha
+        self.current_head_z += (target_head_z - self.current_head_z) * alpha
+        self.current_body_x += (target_body_x - self.current_body_x) * alpha
+        self.current_body_y += (target_body_y - self.current_body_y) * alpha
         
-        self.current_body_x += (self.target_body_x - self.current_body_x) * alpha
-        self.current_body_y += (self.target_body_y - self.current_body_y) * alpha
-        
+        # ส่งไปยัง VTS
         await self._apply_parameters()
 
     async def _apply_parameters(self):
         """ส่งค่าพารามิเตอร์ไปยัง VTS"""
         try:
+            if not self.vts._is_connected():
+                return
+            # รวมค่า breathing เข้าไปใน FacePositionY เพื่อลดการส่งซ้ำ
+            body_y_with_breath = self.current_body_y + (self.breath_value * 0.5)
+
             params = {
                 "FaceAngleX": self.current_head_x * 30.0,
                 "FaceAngleY": self.current_head_y * 30.0,
                 "FaceAngleZ": self.current_head_z * 30.0,
                 "FacePositionX": self.current_body_x * 10.0,
-                "FacePositionY": self.current_body_y * 5.0,
+                "FacePositionY": body_y_with_breath * 5.0,
             }
-            
-            for param_name, value in params.items():
-                await self.vts.inject_parameter(param_name, value)
+
+            # ส่งแบบ batch เพียงครั้งเดียวในแต่ละ tick
+            await self.vts.inject_parameters_bulk(params)
                 
-        except Exception as e:
-            logger.error(f"Apply parameters error: {e}")
+        except:
+            pass
 
     async def _update_breathing(self):
         """Breathing Animation"""
         try:
-            breath_speed = float(self.config.get("breath_speed", 0.8))
+            if not self.vts._is_connected():
+                return
+            # คำนวณค่า breathing แล้วเก็บไว้ให้ _apply_parameters รวมไปด้วย
+            self.breath_value = (math.sin(self.breath_time * self.breath_speed) + 1.0) * 0.5
+            self.breath_value *= self.breath_intensity
             
-            if self.is_generating:
-                breath_intensity = self.idle_breath
-            else:
-                breath_intensity = float(self.config.get("breath_intensity", 0.3))
-            
-            breath_value = (math.sin(self.breath_time * breath_speed) + 1.0) * 0.5
-            breath_value *= breath_intensity
-            
-            await self.vts.inject_parameter("FacePositionY", breath_value * 2.0)
-            
-        except Exception as e:
-            logger.error(f"Breathing error: {e}")
+        except:
+            pass
 
     async def _update_blinking(self):
-        """Blinking"""
+        """Blinking - ปรับความถี่ตามอารมณ์"""
         try:
-            now = time.time()
-            blink_min = float(self.config.get("blink_interval_min", 2.0))
-            blink_max = float(self.config.get("blink_interval_max", 6.0))
-            blink_duration = float(self.config.get("blink_duration", 0.15))
+            if not self.vts._is_connected():
+                return
             
+            now = time.time()
+            
+            # ปรับความถี่การกระพริบตามสถานะ
+            if self.is_speaking or self.is_generating:
+                blink_min = 1.5
+                blink_max = 4.0
+            else:
+                blink_min = 2.0
+                blink_max = 6.0
+            
+            blink_duration = 0.15
             next_blink = self.blink_timer + random.uniform(blink_min, blink_max)
             
             if now >= next_blink:
-                await self.vts.inject_parameter("EyeOpenLeft", 0.0)
-                await self.vts.inject_parameter("EyeOpenRight", 0.0)
+                # ปิดตาแบบ batch
+                await self.vts.inject_parameters_bulk({
+                    "EyeOpenLeft": 0.0,
+                    "EyeOpenRight": 0.0,
+                })
                 await asyncio.sleep(blink_duration)
-                await self.vts.inject_parameter("EyeOpenLeft", 1.0)
-                await self.vts.inject_parameter("EyeOpenRight", 1.0)
+                # เปิดตาแบบ batch
+                await self.vts.inject_parameters_bulk({
+                    "EyeOpenLeft": 1.0,
+                    "EyeOpenRight": 1.0,
+                })
                 
                 self.blink_timer = time.time()
                 
-        except Exception as e:
-            logger.error(f"Blinking error: {e}")
+        except:
+            pass
 
     async def trigger_emotion(self, emotion: str):
         """Trigger hotkey emotion"""
         try:
+            if not self.vts._is_connected():
+                return
+            
             hotkey_map = {
                 "happy": "happy_trigger",
                 "sad": "sad_trigger",
@@ -321,41 +445,30 @@ class MotionController:
             }
             
             hotkey = hotkey_map.get(emotion.lower())
-            if hotkey and self.vts.ws:
+            if hotkey:
                 await self.vts.trigger_hotkey(hotkey)
-                logger.info(f"💫 Triggered emotion: {emotion}")
+                logger.info(f"💫 Emotion: {emotion}")
         except Exception as e:
-            logger.error(f"Emotion trigger error: {e}")
+            logger.error(f"Emotion error: {e}")
 
 
 def create_motion_controller(vts_client, env_config: dict):
-    """สร้าง Motion Controller จาก config"""
+    """สร้าง Motion Controller"""
     config = {
-        "smoothing": env_config.get("VTS_MOVEMENT_SMOOTHING", "0.85"),
-        "intensity": env_config.get("VTS_MOTION_INTENSITY", "0.4"),
-        "idle_head_intensity": env_config.get("VTS_IDLE_HEAD_INTENSITY", "0.15"),
-        "idle_breath_intensity": env_config.get("VTS_IDLE_BREATH_INTENSITY", "0.25"),
-        "breath_speed": env_config.get("VTS_BREATH_SPEED", "0.8"),
-        "breath_intensity": env_config.get("VTS_BREATH_INTENSITY", "0.3"),
-        "blink_interval_min": env_config.get("VTS_BLINK_INTERVAL_MIN", "2.0"),
-        "blink_interval_max": env_config.get("VTS_BLINK_INTERVAL_MAX", "6.0"),
-        "blink_duration": env_config.get("VTS_BLINK_DURATION", "0.15"),
+        "smoothing": env_config.get("VTS_MOVEMENT_SMOOTHING", "0.75"),
+        "intensity": env_config.get("VTS_MOTION_INTENSITY", "1.0"),
+        # รองรับการตั้งค่าเฟรมเรตจาก .env เพื่อลดภาระการส่งพารามิเตอร์
+        "update_dt": env_config.get("VTS_UPDATE_DT", None),
+        # ส่งค่าเกี่ยวกับการหายใจมาไว้ใน config ด้วย
+        "VTS_BREATH_SPEED": env_config.get("VTS_BREATH_SPEED", "0.8"),
+        "VTS_BREATH_INTENSITY": env_config.get("VTS_BREATH_INTENSITY", "0.3"),
+        # คุมความถี่และความสมูทของการสุ่มท่า
+        "action_duration_scale": env_config.get("VTS_ACTION_DURATION_SCALE", "1.15"),
+        "action_rest_min_sec": env_config.get("VTS_ACTION_REST_MIN_SEC", "0.6"),
+        "action_rest_max_sec": env_config.get("VTS_ACTION_REST_MAX_SEC", "1.2"),
+        "idle_hold_prob": env_config.get("VTS_IDLE_HOLD_PROB", "0.35"),
     }
-    
+    # หากไม่ได้ตั้งค่า update_dt ให้ลบทิ้งเพื่อใช้ค่าเริ่มต้น 0.033
+    if config["update_dt"] is None:
+        del config["update_dt"]
     return MotionController(vts_client, config)
-
-async def run_motion():
-    """Entry point used by scripts/vts_human_motion.py (stub)."""
-    try:
-        from .vts_client import VTSClient
-    except Exception:
-        # Fallback import if relative fails
-        from src.adapters.vts.vts_client import VTSClient
-
-    client = VTSClient()
-    await client.connect()
-    # Create a default motion controller and start it
-    ctrl = create_motion_controller(client, {})
-    await ctrl.start()
-    # Keep running until interrupted
-    await asyncio.Event().wait()
