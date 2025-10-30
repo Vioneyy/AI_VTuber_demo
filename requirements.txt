@@ -1,11 +1,15 @@
 websockets
 python-dotenv
 openai
-discord.py
+py-cord
 PyNaCl
 pytchat
 numpy
 f5-tts-th
 huggingface_hub
-keyboard
-noise
+torch
+torchaudio
+
+# หมายเหตุ:
+# - ต้องมี ffmpeg ติดตั้งในระบบสำหรับเล่นเสียงผ่าน Discord (FFmpegPCMAudio)
+# - Whisper.cpp ใช้ไบนารีภายนอก ไม่ใช่แพ็กเกจ Python (ตั้งค่าใน .env)

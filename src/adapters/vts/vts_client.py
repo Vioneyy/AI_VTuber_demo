@@ -1,239 +1,305 @@
 """
-Compatibility VTSClient wrapper built on VTSHumanMotionController.
-Provides lipsync from WAV bytes/file and simple emotion triggers
-so existing adapters (Discord) can work with the new motion controller.
+VTube Studio Client (Fixed .closed check)
 """
-
 import asyncio
-import io
+import websockets
+import json
+import logging
+import os
 import time
-import wave
-import audioop
-from typing import Optional
+from typing import Optional, Dict
+import numpy as np
 
-from .motion_controller import VTSHumanMotionController
-
+logger = logging.getLogger(__name__)
 
 class VTSClient:
-    def __init__(
-        self,
-        plugin_name: str = "AI VTuber",
-        plugin_developer: str = "AI VTuber",
-        host: str = "127.0.0.1",
-        port: int = 8001,
-        config: Optional[object] = None,
-    ) -> None:
-        self.ctrl = VTSHumanMotionController(
-            plugin_name=plugin_name,
-            plugin_developer=plugin_developer,
-            host=host,
-            port=port,
-        )
-        self.config = config
-        self._mouth_id: Optional[str] = None
-        self._smile_id: Optional[str] = None
-        self._motion_task: Optional[asyncio.Task] = None
-        # Expose ws for compatibility
+    def __init__(self, host: str = "localhost", port: int = 8001, plugin_name: str = "AI_VTuber"):
+        self.host = host
+        self.port = port
+        self.plugin_name = plugin_name
         self.ws = None
-        # Optional compatibility fields
-        self.available_parameters = []
-        self.available_hotkeys = []
+        self.auth_token = None
+        self.is_authenticated = False
+        # Rate limiting และ delta-filter สำหรับการส่งพารามิเตอร์
+        self._last_send_ts = 0.0
+        # ลดการส่งค่าเริ่มต้นลง (80ms ≈ 12.5 FPS) เพื่อเสถียรภาพ
+        self._min_send_interval_sec = float(os.getenv("VTS_SEND_MIN_INTERVAL_MS", "80")) / 1000.0
+        self._last_params: Dict[str, float] = {}
+        # ยก threshold ให้สูงขึ้นเพื่อลดการส่งซ้ำ
+        self._epsilon_map: Dict[str, float] = {
+            "EyeOpenLeft": 0.10,
+            "EyeOpenRight": 0.10,
+            "FacePositionX": 0.30,
+            "FacePositionY": 0.30,
+            "FaceAngleX": 1.5,
+            "FaceAngleY": 1.5,
+            "FaceAngleZ": 1.5,
+        }
+        # ตัวแปรสำหรับ adaptive backoff และ suppression
+        self._backoff_factor = 1.0
+        self._suppress_until_ts = 0.0
+        
+        logger.info(f"VTSClient: {host}:{port}")
+
+    def _is_connected(self) -> bool:
+        """✅ ตรวจสอบว่าเชื่อมต่ออยู่หรือไม่"""
+        if not self.ws:
+            return False
+        
+        # ลองใช้ method ต่างๆ ตาม version
+        if hasattr(self.ws, 'closed'):
+            return not self.ws.closed
+        elif hasattr(self.ws, 'close_code'):
+            return self.ws.close_code is None
+        else:
+            # สมมติว่าเชื่อมต่ออยู่
+            return True
 
     async def connect(self):
-        await self.ctrl.connect()
-        ok = await self.ctrl.authenticate()
-        if not ok:
-            raise RuntimeError("VTS authentication failed")
-        await self.ctrl._resolve_param_map()
-        self._mouth_id = self.ctrl.param_map.get("MouthOpen")
-        self._smile_id = self.ctrl.param_map.get("MouthSmile")
-        # ใช้แหล่ง amplitude จากลิปซิงก์ ไม่ใช้ไมค์
-        self.ctrl.enable_mic = False
-        # Mirror ws for external checks
-        self.ws = self.ctrl.ws
-        # คืนค่า True เพื่อรองรับสคริปต์ที่ตรวจผลลัพธ์การเชื่อมต่อ
-        return True
+        """เชื่อมต่อ VTube Studio"""
+        try:
+            uri = f"ws://{self.host}:{self.port}"
+            logger.info(f"📡 กำลังเชื่อมต่อ VTS: {uri}")
+            
+            self.ws = await asyncio.wait_for(
+                websockets.connect(
+                    uri,
+                    ping_interval=10,
+                    ping_timeout=60,
+                ),
+                timeout=5.0
+            )
+            
+            logger.info("✅ WebSocket connected")
+            # หน่วงให้ฝั่ง VTS พร้อมหลัง reconnect
+            await asyncio.sleep(0.5)
+            # รีเซ็ตสถานะ backoff/suppress และค่าเดิม
+            self._backoff_factor = 1.0
+            self._suppress_until_ts = 0.0
+            self._last_params.clear()
+            self._last_send_ts = 0.0
+            
+            # Authenticate
+            await self._authenticate()
+            
+            if self.is_authenticated:
+                logger.info("✅ VTS เชื่อมต่อและ authenticate สำเร็จ")
+            else:
+                logger.warning("⚠️ VTS เชื่อมต่อแต่ authenticate ไม่สำเร็จ")
+            
+        except asyncio.TimeoutError:
+            logger.error("❌ VTS connection timeout")
+            self.ws = None
+        except ConnectionRefusedError:
+            logger.error("❌ VTS ปิดอยู่ หรือ port ผิด")
+            self.ws = None
+        except Exception as e:
+            logger.error(f"❌ VTS connection error: {e}")
+            self.ws = None
 
-    async def verify_connection(self):
-        # Minimal check: ensure websocket is open and authenticated
-        return bool(self.ctrl.ws and self.ctrl.authenticated)
+    async def _authenticate(self):
+        """ขอ authentication token"""
+        try:
+            # 1. Request auth token
+            auth_request = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "auth_request",
+                "messageType": "AuthenticationTokenRequest",
+                "data": {
+                    "pluginName": self.plugin_name,
+                    "pluginDeveloper": "AI_VTuber_Team"
+                }
+            }
+            
+            await self.ws.send(json.dumps(auth_request))
+            response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            data = json.loads(response)
+            
+            if "data" in data and "authenticationToken" in data["data"]:
+                self.auth_token = data["data"]["authenticationToken"]
+                logger.info("✅ ได้ auth token แล้ว")
+            else:
+                logger.error("❌ ไม่ได้ auth token")
+                return
+            
+            # 2. Authenticate with token
+            auth_msg = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "auth",
+                "messageType": "AuthenticationRequest",
+                "data": {
+                    "pluginName": self.plugin_name,
+                    "pluginDeveloper": "AI_VTuber_Team",
+                    "authenticationToken": self.auth_token
+                }
+            }
+            
+            await self.ws.send(json.dumps(auth_msg))
+            response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
+            data = json.loads(response)
+            
+            if data.get("data", {}).get("authenticated"):
+                self.is_authenticated = True
+                logger.info("✅ Authenticated")
+            else:
+                logger.error("❌ Authentication failed")
+            
+        except Exception as e:
+            logger.error(f"❌ Authentication error: {e}")
 
     async def disconnect(self):
-        await self.ctrl.disconnect()
-        # หยุด motion หากกำลังทำงาน
-        try:
-            if self._motion_task and not self._motion_task.done():
-                self._motion_task.cancel()
-        finally:
-            self._motion_task = None
+        """ตัดการเชื่อมต่อ"""
+        if self._is_connected():
+            await self.ws.close()
+            logger.info("🔌 VTS disconnected")
         self.ws = None
 
-    async def reconnect(self):
-        """Disconnect then connect + authenticate again. Returns True if OK."""
-        try:
-            await self.disconnect()
-        except Exception:
-            pass
-        await self.connect()
-        return await self.verify_connection()
-
-    def get_status(self) -> dict:
-        """Return basic connection and parameter mapping status."""
-        return {
-            "connected": bool(self.ctrl.ws and self.ctrl.authenticated),
-            "host": self.ctrl.host,
-            "port": self.ctrl.port,
-            "mapped": dict(self.ctrl.param_map),
-        }
-
-    async def inject_parameter(self, name: str, value: float):
-        """Compatibility method used by MotionController to inject single parameter."""
-        try:
-            await self.ctrl.set_parameters({name: float(value)}, weight=1.0)
-        except Exception:
-            pass
-
-    async def trigger_hotkey(self, name: str):
-        try:
-            await self.ctrl.trigger_hotkey(name)
-        except Exception:
-            pass
-
-    async def lipsync_wav(self, wav_path: str):
-        """Stream mouth-open values by reading a local WAV file path."""
-        data = None
-        try:
-            with open(wav_path, "rb") as f:
-                data = f.read()
-        except Exception:
-            data = None
-        if not data:
+    async def inject_parameter(self, param_name: str, value: float):
+        """ส่งค่าพารามิเตอร์ไปยัง VTS"""
+        if not self._is_connected() or not self.is_authenticated:
             return
-        await self.lipsync_bytes(data)
+        
+        try:
+            msg = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "inject_param",
+                "messageType": "InjectParameterDataRequest",
+                "data": {
+                    "parameterValues": [
+                        {
+                            "id": param_name,
+                            "value": float(value)
+                        }
+                    ]
+                }
+            }
+            
+            await self.ws.send(json.dumps(msg))
+            
+        except Exception as e:
+            logger.error(f"Inject parameter error: {e}")
+            # พยายาม reconnect แบบรวดเร็วเมื่อพบปัญหา keepalive/ping timeout
+            try:
+                await self.disconnect()
+                await self.connect()
+            except Exception as re:
+                logger.error(f"Reconnect failed: {re}")
 
-    async def lipsync_bytes(self, wav_bytes: bytes):
-        """Compute amplitude envelope from WAV bytes and inject MouthOpen into VTS.
+    async def inject_parameters_bulk(self, params: Dict[str, float]):
+        """ส่งค่าพารามิเตอร์หลายตัวแบบ batch เพื่อลดจำนวนข้อความที่ส่ง"""
+        if not self._is_connected() or not self.is_authenticated:
+            return
 
-        - Expects PCM WAV bytes. Falls back silently if parsing fails.
-        - Sends parameter updates ~30–60 Hz depending on chunk.
+        try:
+            now = time.monotonic()
+            # หยุดส่งชั่วคราวถ้าเพิ่งเกิด timeout
+            if now < self._suppress_until_ts:
+                return
+            # หากส่งถี่เกินไปให้ข้ามเฟรมนี้ เพื่อลดภาระส่ง
+            effective_interval = self._min_send_interval_sec * self._backoff_factor
+            if (now - self._last_send_ts) < effective_interval:
+                return
+
+            # กรองเฉพาะค่าที่เปลี่ยนเกิน threshold เพื่อหลีกเลี่ยงการส่งซ้ำโดยไม่จำเป็น
+            filtered_values = []
+            for name, value in params.items():
+                last = self._last_params.get(name)
+                eps = self._epsilon_map.get(name, 0.5)
+                if last is None or abs(float(value) - float(last)) >= eps:
+                    filtered_values.append({"id": name, "value": float(value)})
+                    self._last_params[name] = float(value)
+
+            # หากไม่มีค่าที่เปลี่ยนจริง ๆ ก็ไม่ต้องส่ง
+            if not filtered_values:
+                return
+
+            payload = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "inject_params_batch",
+                "messageType": "InjectParameterDataRequest",
+                "data": {
+                    "parameterValues": filtered_values
+                }
+            }
+
+            await self.ws.send(json.dumps(payload))
+            self._last_send_ts = now
+
+        except Exception as e:
+            logger.error(f"Inject parameters bulk error: {e}")
+            # เพิ่ม backoff และกด suppression ชั่วคราวเพื่อให้ VTS ฟื้นตัว
+            self._backoff_factor = min(self._backoff_factor * 1.5, 4.0)
+            self._suppress_until_ts = time.monotonic() + 1.0
+            await asyncio.sleep(0.5)
+            try:
+                await self.disconnect()
+                await self.connect()
+            except Exception as re:
+                logger.error(f"Reconnect failed: {re}")
+
+    async def trigger_hotkey(self, hotkey_id: str):
+        """Trigger hotkey"""
+        if not self._is_connected() or not self.is_authenticated:
+            return
+        
+        try:
+            msg = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "trigger_hotkey",
+                "messageType": "HotkeyTriggerRequest",
+                "data": {
+                    "hotkeyID": hotkey_id
+                }
+            }
+            
+            await self.ws.send(json.dumps(msg))
+            logger.info(f"💫 Triggered hotkey: {hotkey_id}")
+            
+        except Exception as e:
+            logger.error(f"Trigger hotkey error: {e}")
+
+    async def lipsync_bytes(self, audio_bytes: bytes):
         """
-        if not self.ctrl.authenticated:
+        ลิปซิงก์จาก audio bytes
+        """
+        if not self._is_connected() or not self.is_authenticated:
+            logger.warning("VTS ไม่ได้เชื่อมต่อ - ข้ามลิปซิงก์")
             return
-        mouth_id = self._mouth_id
-        if not mouth_id:
-            # No mouth parameter mapped; nothing to update
-            return
+        
         try:
-            bio = io.BytesIO(wav_bytes)
-            with wave.open(bio, "rb") as wf:
-                nch = wf.getnchannels()
-                width = wf.getsampwidth()
-                rate = wf.getframerate()
-                total_frames = wf.getnframes()
-
-                # Target update cadence ~30ms
-                chunk_frames = max(256, int(rate * 0.03))
-                prev = 0.0
-                t_start = time.time()
-
-                while True:
-                    frames = wf.readframes(chunk_frames)
-                    if not frames:
-                        break
-                    # If stereo, mix to mono for RMS
-                    if nch > 1:
-                        try:
-                            frames_mono = audioop.tomono(frames, width, 0.5, 0.5)
-                        except Exception:
-                            frames_mono = frames
-                    else:
-                        frames_mono = frames
-
-                    try:
-                        rms = audioop.rms(frames_mono, width)  # 0..(2**(8*width-1))
-                    except Exception:
-                        rms = 0
-                    # Normalize to 0..1 (tuneable scaling)
-                    max_val = float(1 << (8 * width - 1))
-                    lvl = min(1.0, max(0.0, (rms / max_val) * 2.0))
-                    # Smooth for natural mouth motion
-                    val = prev + (lvl - prev) * 0.6
-                    prev = val
-
-                    # ส่ง amplitude ไปยัง motion controller เพื่อให้หัว bob ตามการพูด
-                    try:
-                        self.ctrl.speech_target = float(val)
-                        self.ctrl.speaking = val > 0.05
-                    except Exception:
-                        pass
-                    # อัปเดตปากใน VTS
-                    try:
-                        await self.ctrl.set_parameters({mouth_id: float(val)}, weight=1.0)
-                    except Exception:
-                        pass
-
-                    # Sleep according to chunk duration
-                    dt = max(0.0, float(len(frames_mono)) / float(width * max(1, nch) * rate))
-                    await asyncio.sleep(min(0.06, max(0.01, dt)))
-
-                # Gracefully close mouth at the end
-                try:
-                    await self.ctrl.set_parameters({mouth_id: 0.0}, weight=1.0)
-                except Exception:
-                    pass
-            # ปิดสถานะการพูดหลังจบ
-            try:
-                self.ctrl.speaking = False
-                self.ctrl.speech_target = 0.0
-            except Exception:
-                pass
-        except Exception:
-            # Parsing failed; ignore
-            return
-
-    async def trigger_manual_emotion(self, emotion_type: str):
-        """Simple manual emotion pulse via MouthSmile if available."""
-        emo = (emotion_type or "").strip().lower()
-        smile_id = self._smile_id
-        if not smile_id:
-            return
-        # Map emotion to smile level
-        target = 1.0
-        if emo == "sad":
-            target = 0.5
-        elif emo == "thinking":
-            target = 0.8
-        elif emo == "happy":
-            target = 1.1
-        else:
-            target = 0.9
-
-        # Pulse for ~2 seconds
-        t_end = time.time() + 2.0
-        val = float(target)
-        try:
-            while time.time() < t_end:
-                await self.ctrl.set_parameters({smile_id: val}, weight=1.0)
-                await asyncio.sleep(0.08)
-        except Exception:
-            pass
-
-    async def start_motion(self):
-        """Start background human-like motion loop (head, blink, breathing)."""
-        if self._motion_task and not self._motion_task.done():
-            return
-        async def _runner():
-            try:
-                await self.ctrl.run()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # Avoid crashing the orchestrator
-                pass
-        self._motion_task = asyncio.create_task(_runner())
-
-    async def stop_motion(self):
-        """Stop background motion loop."""
-        if self._motion_task and not self._motion_task.done():
-            self._motion_task.cancel()
-        self._motion_task = None
+            import io
+            import wave
+            
+            # อ่าน WAV header
+            wav_io = io.BytesIO(audio_bytes)
+            with wave.open(wav_io, 'rb') as wav:
+                sample_rate = wav.getframerate()
+                n_frames = wav.getnframes()
+                audio_data = wav.readframes(n_frames)
+                duration = n_frames / sample_rate
+            
+            logger.info(f"🎤 Lipsync: {duration:.2f}s, {sample_rate}Hz")
+            
+            # จำลองลิปซิงก์แบบง่าย (sine wave)
+            steps = int(duration * 20)  # 20 FPS
+            for i in range(steps):
+                t = i / 20.0
+                
+                # Mouth open based on sine wave
+                mouth_value = abs(np.sin(t * 10.0)) * 0.8
+                
+                await self.inject_parameter("MouthOpen", mouth_value)
+                await asyncio.sleep(0.05)
+            
+            # ปิดปาก
+            await self.inject_parameter("MouthOpen", 0.0)
+            
+            logger.info("✅ Lipsync เสร็จสิ้น")
+            
+        except Exception as e:
+            logger.error(f"Lipsync error: {e}", exc_info=True)
