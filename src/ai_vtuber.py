@@ -27,6 +27,7 @@ from src.llm.chatgpt_client import ChatGPTClient
 from src.personality.personality import PersonalitySystem
 from src.adapters.tts.f5_tts_thai import create_tts_engine
 from src.audio.stt_whispercpp import WhisperCppSTT
+from src.audio.rvc_adapter import RVCv2Adapter
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +119,12 @@ class AIVTuberOrchestrator:
             
             # 6. RVC (ถ้าเปิด)
             if self.rvc_enabled:
-                # TODO: Initialize RVC
-                logger.info("✅ RVC enabled")
+                try:
+                    preset = os.getenv("VOICE_PRESET", "anime_girl")
+                    self.rvc = RVCv2Adapter(preset)
+                    logger.info(f"✅ RVC enabled (preset={preset})")
+                except Exception as e:
+                    logger.warning(f"⚠️ RVC ไม่พร้อมใช้งาน: {e}")
             
             # 7. Audio Player
             self.audio_player = DiscordAudioPlayer(self.motion_controller)
