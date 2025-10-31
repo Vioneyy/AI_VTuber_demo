@@ -124,6 +124,7 @@ class Config:
     # === RVC ===
     ENABLE_RVC = os.getenv("ENABLE_RVC", "false").lower() == "true"
     VOICE_PRESET = os.getenv("VOICE_PRESET", "anime_girl")
+    RVC_GAIN_DB = float(os.getenv("RVC_GAIN_DB", "0.0"))
     
     # === Whisper.cpp STT ===
     DISCORD_VOICE_STT_ENABLED = os.getenv("DISCORD_VOICE_STT_ENABLED", "false").lower() == "true"

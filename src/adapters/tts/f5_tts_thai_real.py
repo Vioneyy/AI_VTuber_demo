@@ -15,7 +15,8 @@ class F5TTSThai:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.use_reference = os.getenv("F5_TTS_USE_REFERENCE", "false").lower() == "true"
-        self.ref_audio_path = os.getenv("TTS_REFERENCE_WAV", "ref_audio.wav")
+        # ค่าเริ่มต้นพาธไฟล์อ้างอิงเสียงชี้ไปยังไฟล์ในโปรเจ็กต์โดยตรง
+        self.ref_audio_path = os.getenv("TTS_REFERENCE_WAV", r"d:\AI_VTuber_demo\ref_audio.wav")
         self.ref_text = os.getenv("F5_TTS_REF_TEXT", "")
         self.speed = float(os.getenv("F5_TTS_SPEED", "1.0"))
         self.steps = int(os.getenv("F5_TTS_STEPS", "32"))  # default 32
@@ -84,19 +85,13 @@ class F5TTSThai:
                     speed=self.speed
                 )
             else:
-                # ไลบรารีต้องการ ref_audio/ref_text แบบจำเป็น: ให้ส่ง fallback
-                # - ref_audio: หากมีไฟล์อ้างอิงใช้ไฟล์นั้น มิฉะนั้นใช้เสียงเงียบสั้น ๆ ในหน่วยความจำ
-                # - ref_text: ส่ง "" เพื่อไม่ให้เนื้อหาติดมา (ให้ระบบทำ ASR เงียบซึ่งคืนว่าง)
-                if os.path.exists(self.ref_audio_path):
-                    fallback_ref_audio = self.ref_audio_path
-                    logger.info("🔇 ปิด reference (ใช้ไฟล์อ้างอิงเริ่มต้น + ref_text ว่าง)")
-                else:
-                    fallback_ref_audio = BytesIO(self._generate_silence(0.5))
-                    logger.info("🔇 ปิด reference (ใช้เสียงเงียบ + ref_text ว่าง)")
-
+                # ปิด reference: ใช้ไฟล์อ้างอิงจริงถ้ามี เพื่อให้มีโทนเสียงและหลีกเลี่ยง ASR
+                ref_path = self.ref_audio_path if os.path.exists(self.ref_audio_path) else self._get_silent_reference()
+                dummy_ref_text = (text[:30] or "a")
+                logger.info(f"🔇 ปิด reference (ใช้ ref_audio='{ref_path}', ref_text='{dummy_ref_text[:30]}')")
                 generated_audio = self.tts.infer(
-                    fallback_ref_audio,
-                    "",
+                    ref_path,
+                    dummy_ref_text,
                     text,
                     step=self.steps,
                     cfg=self.cfg_strength,
@@ -128,7 +123,7 @@ class F5TTSThai:
         # RMS Normalize
         rms = np.sqrt(np.mean(audio**2))
         if rms > 1e-6:
-            target_rms = 0.1
+            target_rms = 0.2  # เพิ่มระดับเสียงเล็กน้อยเพื่อให้ได้ยินชัดขึ้น
             audio = audio * (target_rms / rms)
         
         # Fade in/out (10ms)
