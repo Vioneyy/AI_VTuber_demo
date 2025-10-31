@@ -300,4 +300,37 @@ class Personality:
 
         return Personality(data=payload)
 
-__all__ = ["PersonalityManager", "Personality"]
+class PersonalitySystem:
+    """
+    PersonalitySystem แบบบาง เพื่อให้เข้ากับ Orchestrator/ResponseGenerator
+    - จัดเก็บชื่อ persona ปัจจุบัน
+    - คืน system prompt ผ่าน persona.get_persona
+    - ใช้ได้กับ SafetyFilter ที่ต้องการ personality ชื่อสั้น ๆ
+    """
+
+    def __init__(self, persona_name: str = "miko"):
+        self._persona_name = persona_name
+        try:
+            # มีไว้เผื่ออนาคตจะใช้ PersonalityManager สำหรับ mapping อารมณ์/ท่าทาง
+            self._manager = PersonalityManager()
+        except Exception:
+            self._manager = None
+
+    def get_system_prompt(self) -> str:
+        """คืน system prompt ตาม persona ปัจจุบัน"""
+        try:
+            from .persona import get_persona  # type: ignore
+        except Exception:
+            from src.personality.persona import get_persona  # type: ignore
+        return get_persona(self._persona_name)
+
+    def get_current_personality(self) -> str:
+        """คืนชื่อ personality/persona ปัจจุบัน (string)"""
+        return self._persona_name
+
+    def set_persona(self, persona_name: str) -> None:
+        """เปลี่ยน persona"""
+        self._persona_name = persona_name
+
+
+__all__ = ["PersonalityManager", "PersonalitySystem", "Personality"]

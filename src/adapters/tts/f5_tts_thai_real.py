@@ -70,26 +70,38 @@ class F5TTSThai:
 
             logger.info(f"🎤 F5-TTS-Thai กำลังสังเคราะห์: {text[:50]}...")
 
-            # ตั้งค่า reference
-            if self.use_reference and os.path.exists(self.ref_audio_path) and self.ref_text:
-                ref_audio = self.ref_audio_path
-                ref_text = self.ref_text
-                logger.info(f"🎙️ ใช้ reference: {ref_text[:30]}...")
+            # ตั้งค่า reference เฉพาะกรณีที่ข้อมูลครบ เพื่อหลีกเลี่ยง None เข้า preprocess
+            use_ref = self.use_reference and os.path.exists(self.ref_audio_path) and bool(self.ref_text)
+            if use_ref:
+                logger.info(f"🎙️ ใช้ reference: {self.ref_text[:30]}...")
+                # ใช้ตำแหน่งอาร์กิวเมนต์ตามที่ไลบรารีกำหนด (ref_audio, ref_text, gen_text)
+                generated_audio = self.tts.infer(
+                    self.ref_audio_path,
+                    self.ref_text,
+                    text,
+                    step=self.steps,
+                    cfg=self.cfg_strength,
+                    speed=self.speed
+                )
             else:
-                # ไม่ใช้ reference: ส่ง None เพื่อข้ามขั้นตอน preprocess/transcribe ของไลบรารี
-                ref_audio = None
-                ref_text = None
-                logger.info("🔇 ปิด reference (skip preprocess)")
+                # ไลบรารีต้องการ ref_audio/ref_text แบบจำเป็น: ให้ส่ง fallback
+                # - ref_audio: หากมีไฟล์อ้างอิงใช้ไฟล์นั้น มิฉะนั้นใช้เสียงเงียบสั้น ๆ ในหน่วยความจำ
+                # - ref_text: ส่ง "" เพื่อไม่ให้เนื้อหาติดมา (ให้ระบบทำ ASR เงียบซึ่งคืนว่าง)
+                if os.path.exists(self.ref_audio_path):
+                    fallback_ref_audio = self.ref_audio_path
+                    logger.info("🔇 ปิด reference (ใช้ไฟล์อ้างอิงเริ่มต้น + ref_text ว่าง)")
+                else:
+                    fallback_ref_audio = BytesIO(self._generate_silence(0.5))
+                    logger.info("🔇 ปิด reference (ใช้เสียงเงียบ + ref_text ว่าง)")
 
-            # เรียก TTS.infer ตาม API ที่ถูกต้อง
-            generated_audio = self.tts.infer(
-                ref_audio=ref_audio,
-                ref_text=ref_text,
-                gen_text=text,
-                step=self.steps,
-                cfg=self.cfg_strength,
-                speed=self.speed
-            )
+                generated_audio = self.tts.infer(
+                    fallback_ref_audio,
+                    "",
+                    text,
+                    step=self.steps,
+                    cfg=self.cfg_strength,
+                    speed=self.speed
+                )
 
             # Clean audio
             audio_data = self._clean_audio(generated_audio)

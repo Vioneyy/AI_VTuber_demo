@@ -1,6 +1,7 @@
 from __future__ import annotations
 import subprocess
 import tempfile
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -66,3 +67,67 @@ class WhisperCppSTT:
 
     def transcribe_file(self, wav_path: Path, language: Optional[str] = None) -> str:
         return self.transcribe_wav_bytes(Path(wav_path).read_bytes(), language)
+
+    async def record_and_transcribe(self, voice_client, duration_sec: int = 5) -> str:
+        """
+        บันทึกเสียงจาก Discord voice channel ชั่วคราว แล้วถอดความด้วย whisper.cpp
+
+        - ใช้ `py-cord` sinks (WaveSink) หากมี
+        - รองรับ GPU offload ผ่านการตั้งค่า `WHISPER_CPP_NGL`
+
+        Returns: ข้อความถอดความ (string) หรือว่างเปล่าหากไม่สำเร็จ
+        """
+        try:
+            if not voice_client or not voice_client.is_connected():
+                return ""
+
+            # นำเข้า sinks จาก py-cord
+            import discord
+            from discord import sinks
+
+            recorded = {"file": None}
+
+            def _finished_callback(sink: sinks.Sink, *args):
+                # พยายามเลือกไฟล์แรกที่บันทึกได้จาก sink
+                try:
+                    # py-cord ให้รายการไฟล์ใน sink.files
+                    if hasattr(sink, "files") and sink.files:
+                        recorded["file"] = sink.files[0]
+                    else:
+                        # fallback: ดึงจาก audio_data หากมี
+                        if hasattr(sink, "audio_data") and sink.audio_data:
+                            for _uid, data in sink.audio_data.items():
+                                # data.file เป็นพาธไฟล์ wav ต่อผู้ใช้ (หาก WaveSink)
+                                fp = getattr(data, "file", None)
+                                if fp:
+                                    recorded["file"] = fp
+                                    break
+                except Exception:
+                    recorded["file"] = None
+
+            # เริ่มบันทึก
+            sink = sinks.WaveSink()
+            voice_client.start_recording(sink, _finished_callback, None)
+            await asyncio.sleep(max(1, int(duration_sec)))
+            voice_client.stop_recording()
+
+            wav_path = recorded.get("file")
+            if not wav_path:
+                return ""
+
+            try:
+                wav_bytes = Path(wav_path).read_bytes()
+            except Exception:
+                return ""
+            finally:
+                # ลบไฟล์ชั่วคราวหากมี
+                try:
+                    Path(wav_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            return self.transcribe_wav_bytes(wav_bytes)
+
+        except Exception:
+            # กรณีเวอร์ชัน py-cord ไม่รองรับการบันทึก หรือเกิดข้อผิดพลาดอื่น ๆ
+            return ""
