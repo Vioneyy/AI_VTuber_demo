@@ -83,8 +83,15 @@ python src/main.py
 
 ## ใช้ STT ใน Discord
 - คำสั่ง `!join` ให้บอทเข้าห้องเสียง
-- คำสั่ง `!stt <seconds>` บันทึกเสียงช่วงสั้น ๆ (ดีฟอลต์ 5 วินาที) แล้วถอดความด้วย Whisper.cpp
+- คำสั่ง `!listen <seconds>` บันทึกเสียงช่วงสั้น ๆ (ดีฟอลต์ 5 วินาที) แล้วถอดความด้วย Whisper.cpp
 - คำสั่ง `!leave` ออกจากห้องเสียง
+
+หมายเหตุ:
+- ต้องตั้งค่า `.env` ให้เปิด STT โดยกำหนด `DISCORD_VOICE_STT_ENABLED=true`
+- ตั้ง `WHISPER_CPP_BIN_PATH` ไปยังไบนารี `main.exe` ที่ build แบบ GPU (CUDA/cuBLAS หรือ OpenCL)
+- เลือกโมเดลตามกำลังเครื่อง เช่น `ggml-small.bin` และตั้ง `WHISPER_CPP_LANG=th` สำหรับภาษาไทย
+- ปรับ `WHISPER_CPP_THREADS` ให้เหมาะกับ CPU และ `WHISPER_CPP_NGL` เพื่อ offload ไป GPU (เช่น 35 หรือ 999 ขึ้นกับรุ่นที่ build)
+- เวลา `timeout` ใช้ `WHISPER_CPP_TIMEOUT_MS` (เช่น 10000)
 
 ข้อความที่ถอดความจะถูกส่งเข้า `PriorityScheduler` และประมวลผลเหมือนข้อความแชทปกติ (ส่งต่อเข้า LLM, สร้าง TTS, ฯลฯ)
 

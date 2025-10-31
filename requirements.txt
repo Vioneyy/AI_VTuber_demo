@@ -9,6 +9,8 @@ f5-tts-th
 huggingface_hub
 torch
 torchaudio
+gtts
+pydub
 
 # หมายเหตุ:
 # - ต้องมี ffmpeg ติดตั้งในระบบสำหรับเล่นเสียงผ่าน Discord (FFmpegPCMAudio)

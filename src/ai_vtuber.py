@@ -1,560 +1,340 @@
-# src/ai_vtuber.py
 """
-AI VTuber Orchestrator (Robust component init + non-blocking TTS + Discord retry)
+ai_vtuber.py - AI VTuber Main Orchestrator
+แก้ไขเพื่อรองรับ: Queue, Safety Filter, Response Generator, Audio Player
 """
-import os
-import sys
+
 import asyncio
 import logging
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
+# Core systems
+from src.core.safety_filter import get_safety_filter
+from src.core.queue_manager import get_queue_manager, QueuedMessage, MessageSource
+from src.core.admin_commands import get_admin_handler
+from src.core.response_generator import get_response_generator
 
-load_dotenv()
+# Adapters
+from src.adapters.vts.motion_controller import create_motion_controller
+from src.adapters.vts.vts_client import VTSClient
+from src.adapters.audio_player import DiscordAudioPlayer
+from src.adapters.discord_bot import create_discord_bot
+from src.adapters.youtube_live import create_youtube_live_adapter
 
-logger = logging.getLogger("ai_vtuber")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# LLM & TTS
+from src.llm.chatgpt_client import ChatGPTClient
+from src.personality.personality import PersonalitySystem
+from src.adapters.tts.f5_tts_thai import create_tts_engine
+from src.audio.stt_whispercpp import WhisperCppSTT
+
+logger = logging.getLogger(__name__)
 
 
 class AIVTuberOrchestrator:
+    """Main orchestrator ควบคุมทุกส่วนของระบบ"""
+    
     def __init__(self):
         logger.info("🚀 AI VTuber Orchestrator เริ่มต้น...")
-        self.scheduler = None
-        self.policy = None
+        
+        # โหลด .env
+        load_dotenv()
+        
+        # Core components
+        self.safety_filter = get_safety_filter()
+        self.queue_manager = get_queue_manager()
+        self.admin_handler = get_admin_handler()
+        
+        # LLM & Personality
         self.llm = None
+        self.personality = None
+        self.response_generator = None
+        
+        # VTS
+        self.vts_client = None
+        self.motion_controller = None
+        
+        # TTS & RVC
         self.tts = None
-        self.vts = None
-        self.motion = None
+        self.rvc = None
+        self.rvc_enabled = os.getenv("ENABLE_RVC", "false").lower() == "true"
+        
+        # Audio Player
+        self.audio_player = None
+        
+        # Adapters
         self.discord_bot = None
-        self.youtube = None
-
-        self._discord_task: asyncio.Task | None = None
-        self._youtube_task: asyncio.Task | None = None
-        self._worker_task: asyncio.Task | None = None
-
-        self._initialize_components()
-
-    def _initialize_components(self):
-        logger.info("🔧 เริ่มสร้าง components...")
-
+        self.youtube_adapter = None
+        
+        # STT System
+        self.stt_system = None
+        
+        # State
+        self.is_running = False
+    
+    async def initialize(self):
+        """เริ่มต้นทุก components"""
         try:
-            from src.core.scheduler import PriorityScheduler
-            self.scheduler = PriorityScheduler()
-            logger.info("✅ Scheduler สร้างแล้ว")
-        except Exception as e:
-            logger.error(f"Scheduler creation failed: {e}", exc_info=True)
-            self.scheduler = None
-
-        try:
-            from src.core.policy import PolicyGuard
-            self.policy = PolicyGuard()
-            logger.info("✅ Policy Guard สร้างแล้ว")
-        except Exception as e:
-            logger.error(f"PolicyGuard creation failed: {e}", exc_info=True)
-            self.policy = None
-
-        try:
-            from src.llm.chatgpt_client import ChatGPTClient
+            logger.info("🔧 เริ่มสร้าง components...")
+            
+            # 1. Personality System
             persona_name = os.getenv("PERSONA_NAME", "miko")
-            self.llm = ChatGPTClient(persona_name=persona_name)
-            logger.info(f"✅ LLM สร้างแล้ว (persona: {persona_name})")
-        except Exception as e:
-            logger.error(f"LLM creation failed: {e}", exc_info=True)
-            self.llm = None
-
-        # TTS: ใช้ factory เพื่อให้มีตัวเลือก fallback (เช่น gTTS) ที่ใช้งานได้จริง
-        try:
-            from src.adapters.tts.f5_tts_thai import create_tts_engine
-            self.tts = create_tts_engine()
-            logger.info("✅ TTS สร้างแล้วผ่าน factory (พร้อม fallback)")
-        except Exception as e:
-            logger.error(f"TTS factory creation failed: {e}", exc_info=True)
-            self.tts = None
-
-        try:
-            from src.adapters.vts.vts_client import VTSClient
+            self.personality = PersonalitySystem(persona_name)
+            logger.info(f"✅ Personality: {persona_name}")
+            
+            # 2. LLM
+            self.llm = ChatGPTClient(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model=os.getenv("LLM_MODEL"),
+                personality_system=self.personality
+            )
+            logger.info("✅ LLM สร้างแล้ว")
+            
+            # 3. Response Generator
+            self.response_generator = get_response_generator(
+                self.llm,
+                self.personality
+            )
+            logger.info("✅ Response Generator สร้างแล้ว")
+            
+            # 4. VTS
             vts_host = os.getenv("VTS_HOST", "127.0.0.1")
             vts_port = int(os.getenv("VTS_PORT", "8001"))
-            self.vts = VTSClient(host=vts_host, port=vts_port)
-            logger.info("✅ VTS Client สร้างแล้ว")
-        except Exception as e:
-            logger.error(f"VTSClient creation failed: {e}", exc_info=True)
-            self.vts = None
-
-        try:
-            from src.adapters.vts.motion_controller import create_motion_controller
-            self.motion = create_motion_controller(self.vts, os.environ)
-            logger.info("✅ Motion Controller สร้างแล้ว")
-        except Exception as e:
-            logger.error(f"MotionController creation failed: {e}", exc_info=True)
-            self.motion = None
-
-        try:
-            from src.adapters.discord_bot import DiscordBotAdapter
+            
+            self.vts_client = VTSClient(vts_host, vts_port)
+            await self.vts_client.connect()
+            
+            self.motion_controller = create_motion_controller(
+                self.vts_client,
+                env=dict(os.environ)
+            )
+            await self.motion_controller.start()
+            logger.info("✅ VTS Motion Controller พร้อมแล้ว")
+            
+            # 5. TTS
+            tts_engine = os.getenv("TTS_ENGINE", "f5_tts_thai")
+            self.tts = create_tts_engine(tts_engine)
+            logger.info(f"✅ TTS Engine: {tts_engine}")
+            
+            # 6. RVC (ถ้าเปิด)
+            if self.rvc_enabled:
+                # TODO: Initialize RVC
+                logger.info("✅ RVC enabled")
+            
+            # 7. Audio Player
+            self.audio_player = DiscordAudioPlayer(self.motion_controller)
+            logger.info("✅ Audio Player พร้อมแล้ว")
+            
+            # 8. STT System (ถ้ามี)
             try:
-                self.discord_bot = DiscordBotAdapter(self)
-            except Exception:
-                self.discord_bot = DiscordBotAdapter()
-            logger.info("✅ Discord Bot สร้างเสร็จแล้ว")
-        except Exception as e:
-            logger.error(f"DiscordBotAdapter creation failed: {e}", exc_info=True)
-            self.discord_bot = None
-
-        try:
-            from src.adapters.youtube_live import YouTubeAdapter
-            self.youtube = YouTubeAdapter()
-            logger.info("✅ YouTube Adapter สร้างเสร็จแล้ว")
-        except Exception:
-            self.youtube = None
-            logger.info("ℹ️ YouTube Adapter ไม่ถูกใช้งาน or ไม่สามารถสร้างได้")
-
-        logger.info("🔧 การสร้าง components เสร็จสิ้น (บางตัวอาจล้ม)")
-
-    async def _start_discord_safe(self, token: str):
-        """
-        Start Discord one-shot and report clear errors. Avoid infinite retry when token invalid.
-        """
-        if not self.discord_bot:
-            logger.warning("Discord adapter not available; skipping Discord start.")
-            return
-
-        try:
-            logger.info("🚀 Starting Discord bot...")
-            await self.discord_bot.start_bot(token)
-            logger.info("✅ Discord bot exited normally.")
-        except asyncio.CancelledError:
-            logger.info("Discord start task cancelled.")
-        except Exception as e:
-            logger.error(f"Discord bot start failed: {e}", exc_info=True)
-            try:
-                from discord.errors import LoginFailure
-                if isinstance(e, LoginFailure):
-                    logger.error("❌ โทเคน Discord ไม่ถูกต้อง: ใช้ 'Bot Token' จาก Developer Portal และเชิญบอทเข้ากิลด์ให้ถูกต้อง")
-            except Exception:
-                pass
-            # เคลียร์ resource เพื่อไม่ให้ค้าง
-            try:
-                if self.discord_bot and getattr(self.discord_bot, "stop", None):
-                    await self.discord_bot.stop()
-            except Exception:
-                pass
-            logger.info("ℹ️ ข้ามการเริ่ม Discord ต่อเนื่อง — โปรดแก้ไขโทเคนแล้วรันใหม่")
-
-    async def start(self):
-        try:
-            logger.info("="*60)
-            logger.info("🎬 เริ่มระบบ AI VTuber")
-            logger.info("="*60)
-
-            logger.info("📡 กำลังเชื่อมต่อ VTS...")
-            if self.vts:
-                try:
-                    await self.vts.connect()
-                except Exception as e:
-                    logger.error(f"VTS connect raised: {e}", exc_info=True)
-            else:
-                logger.warning("⚠️ VTS client not available (skipping connect)")
-
-            connected = False
-            try:
-                connected = bool(self.vts and getattr(self.vts, "_is_connected", lambda: False)())
-            except Exception:
-                connected = False
-
-            if not connected:
-                logger.warning("⚠️ ไม่สามารถเชื่อมต่อ VTS (ระบบจะพยายามทำงานต่อได้ แต่ VTS จะไม่ถูกควบคุม)")
-            else:
-                if self.motion:
-                    try:
-                        await self.motion.start()
-                    except Exception as e:
-                        logger.error(f"Motion controller start failed: {e}", exc_info=True)
-
-            logger.info("⚙️ เริ่ม Message Worker...")
-            self._worker_task = asyncio.create_task(self._message_worker())
-
-            if self.youtube:
-                try:
-                    if hasattr(self.youtube, "start"):
-                        self._youtube_task = asyncio.create_task(self.youtube.start())
-                        logger.info("✅ YouTube Adapter started (background).")
-                except Exception as e:
-                    logger.error(f"YouTube adapter start failed (will continue): {e}", exc_info=True)
-
-            discord_token = os.getenv("DISCORD_BOT_TOKEN")
-            if not discord_token:
-                logger.error("❌ ไม่มี DISCORD_BOT_TOKEN ใน .env — ข้ามการเริ่ม Discord bot")
-            else:
-                self._discord_task = asyncio.create_task(self._start_discord_safe(discord_token))
-
-            logger.info("✅ ระบบเริ่มทำงานเรียบร้อย — อยู่ในโหมดรันหลัก (กด Ctrl+C เพื่อหยุด)")
-            try:
-                while True:
-                    await asyncio.sleep(1.0)
-            except KeyboardInterrupt:
-                logger.info("\n⚠️ รับสัญญาณหยุด (Ctrl+C) — กำลังปิดระบบ...")
-
-            await self._shutdown()
-
-        except Exception as e:
-            logger.error(f"❌ Start error: {e}", exc_info=True)
-            try:
-                await self._shutdown()
-            except Exception as se:
-                logger.error(f"Error during shutdown after start failure: {se}", exc_info=True)
-
-    async def _message_worker(self):
-        """Message worker — non-blocking TTS/LLM (heavy ops run in thread)"""
-        logger.info("👷 Message worker เริ่มทำงาน")
-
-        if not self.scheduler:
-            logger.warning("No scheduler available; message worker will idle.")
-            while True:
-                try:
-                    await asyncio.sleep(1.0)
-                except asyncio.CancelledError:
-                    break
-            return
-
-        while True:
-            try:
-                message = None
-                try:
-                    message = await self.scheduler.get_next_message(timeout=1.0)
-                except Exception:
-                    try:
-                        message = await self.scheduler.get_next(timeout=1.0)
-                    except Exception:
-                        message = None
-
-                if not message:
-                    await asyncio.sleep(0.1)
-                    continue
-
-                text = getattr(message, "text", "") or ""
-                logger.info(f"📨 ประมวลผล: [{getattr(message, 'source', '?')}] {text[:80]}")
-
-                if self.policy and not self.policy.should_respond(text):
-                    logger.info("🚫 ข้ามข้อความ (policy)")
-                    continue
-
-                # กำหนดอารมณ์เบื้องต้นจากข้อความเพื่อให้ motion สอดคล้องสถานการณ์
-                mood, energy, mood_details = _infer_comprehensive_mood(text)
-                try:
-                    if self.motion:
-                        self.motion.set_mood(mood, energy, mood_details)
-                        # แทรก emotion ผ่าน hotkey ถ้ามี แมป
-                        await self.motion.trigger_emotion(mood)
-                except Exception:
-                    pass
-
-                # Generate response (if LLM blocking, run in thread)
-                answer = None
-                if self.llm:
-                    try:
-                        if asyncio.iscoroutinefunction(getattr(self.llm, "generate_response", None)):
-                            answer = await self.llm.generate_response(text)
-                        else:
-                            answer = await asyncio.to_thread(self.llm.generate_response, text)
-                    except Exception as e:
-                        logger.error(f"LLM generation failed: {e}", exc_info=True)
-                        answer = "ขอโทษ, เกิดข้อผิดพลาดขณะสร้างคำตอบ"
+                if os.getenv("DISCORD_VOICE_STT_ENABLED", "false").lower() == "true":
+                    self.stt_system = WhisperCppSTT()
+                    logger.info("✅ STT (Whisper.cpp) พร้อมใช้งาน")
                 else:
-                    answer = "ขอโทษ ฉันไม่สามารถตอบได้ในขณะนี้"
-
-                logger.info(f"💬 คำตอบ: {str(answer)[:80]}")
-
-                # tell motion we're generating
-                if self.motion:
-                    try:
-                        self.motion.set_generating(True)
-                    except Exception:
-                        pass
-
-                # TTS synth (run in thread to avoid blocking)
-                audio_bytes = None
-                if self.tts:
-                    try:
-                        if hasattr(self.tts, "synthesize"):
-                            audio_bytes = await asyncio.to_thread(self.tts.synthesize, str(answer))
-                        elif hasattr(self.tts, "speak"):
-                            audio_bytes = await asyncio.to_thread(self.tts.speak, str(answer), os.getenv("TTS_VOICE", "default"), "neutral")
-                        else:
-                            logger.warning("TTS adapter present but no known synthesize method.")
-                    except Exception as e:
-                        logger.error(f"TTS synth failed: {e}", exc_info=True)
-                        audio_bytes = None
-                else:
-                    logger.warning("TTS not available; skipping audio synth.")
-
-                # Play via discord (non-blocking)
-                if self.discord_bot and audio_bytes:
-                    try:
-                        if self.motion:
-                            self.motion.set_speaking(True)
-                        # play_audio_bytes is async; it handles voice join internally
-                        await self.discord_bot.play_audio_bytes(audio_bytes)
-                    except Exception as e:
-                        logger.error(f"Discord play error: {e}", exc_info=True)
-                    finally:
-                        if self.motion:
-                            try:
-                                self.motion.set_speaking(False)
-                            except Exception:
-                                pass
-
-                # สร้าง mouth envelope เพื่อส่งผ่าน Motion (รวมกับ body motion เพื่อไม่ชน rate-limit)
-                if self.vts and self.motion and audio_bytes and hasattr(self.vts, "compute_mouth_envelope"):
-                    try:
-                        series, interval_sec = await self.vts.compute_mouth_envelope(audio_bytes)
-                        if series:
-                            self.motion.set_mouth_envelope(series, interval_sec)
-                    except Exception as e:
-                        logger.debug(f"Compute mouth envelope failed: {e}")
-
-                if self.motion:
-                    try:
-                        self.motion.set_generating(False)
-                    except Exception:
-                        pass
-
+                    logger.info("ℹ️ ปิด STT (ตั้งค่า DISCORD_VOICE_STT_ENABLED=true เพื่อเปิด)")
             except Exception as e:
-                logger.error(f"Message worker error: {e}", exc_info=True)
-                await asyncio.sleep(0.5)
-
-    async def _shutdown(self):
-        logger.info("🔌 กำลังปิด components...")
-        try:
-            if self._youtube_task and not self._youtube_task.done():
-                self._youtube_task.cancel()
-            if self._discord_task and not self._discord_task.done():
-                self._discord_task.cancel()
-            if self._worker_task and not self._worker_task.done():
-                self._worker_task.cancel()
-        except Exception:
-            pass
-
-        try:
-            if self.motion:
-                await self.motion.stop()
+                logger.warning(f"⚠️ STT (Whisper.cpp) ไม่พร้อม: {e}")
+            
+            # 9. Discord Bot
+            discord_token = os.getenv("DISCORD_BOT_TOKEN")
+            if discord_token:
+                self.discord_bot = create_discord_bot(
+                    token=discord_token,
+                    motion_controller=self.motion_controller,
+                    stt_system=self.stt_system
+                )
+                logger.info("✅ Discord Bot สร้างแล้ว")
+            
+            # 10. YouTube Live
+            youtube_stream_id = os.getenv("YOUTUBE_STREAM_ID")
+            if youtube_stream_id:
+                self.youtube_adapter = create_youtube_live_adapter(
+                    stream_id=youtube_stream_id,
+                    motion_controller=self.motion_controller
+                )
+                if self.youtube_adapter:
+                    logger.info("✅ YouTube Live Adapter สร้างแล้ว")
+            
+            logger.info("=" * 60)
+            logger.info("✅ ทุก components พร้อมแล้ว!")
+            logger.info("=" * 60)
+            
+            return True
+        
         except Exception as e:
-            logger.debug(f"Motion stop error: {e}")
-
+            logger.error(f"❌ เกิดข้อผิดพลาดในการเริ่มต้น: {e}", exc_info=True)
+            return False
+    
+    async def process_message(self, message: QueuedMessage) -> bool:
+        """
+        ประมวลผลข้อความจากคิว
+        
+        Flow:
+        1. Generate Response (มี safety check อยู่ในนี้)
+        2. TTS
+        3. RVC (ถ้าเปิด)
+        4. Play Audio + Lip Sync
+        
+        Returns:
+            True = สำเร็จ, False = ล้มเหลว
+        """
         try:
-            if self.vts:
-                await self.vts.disconnect()
+            logger.info(f"▶️ Processing: [{message.source.value}] {message.text[:50]}")
+            
+            # 1. Generate Response
+            response_text, rejection_reason = await self.response_generator.generate_response(
+                user_message=message.text,
+                user=message.user,
+                source=message.source.value,
+                repeat_question=message.metadata.get("repeat_question", False)
+            )
+            
+            if not response_text:
+                logger.warning(f"⚠️ Rejected: {rejection_reason}")
+                # TODO: ส่งข้อความปฏิเสธกลับไปยัง user
+                return False
+            
+            logger.info(f"💬 Response: {response_text[:100]}")
+            
+            # 2. TTS
+            audio_file = await self.tts.generate(response_text)
+            if not audio_file or not Path(audio_file).exists():
+                logger.error("❌ TTS ล้มเหลว")
+                return False
+            
+            logger.info(f"🎵 TTS: {audio_file}")
+            
+            # 3. RVC (ถ้าเปิด)
+            if self.rvc_enabled and self.rvc:
+                try:
+                    audio_file = await self.rvc.convert(audio_file)
+                    logger.info(f"🎤 RVC: {audio_file}")
+                except Exception as e:
+                    logger.warning(f"⚠️ RVC error (ใช้เสียงเดิม): {e}")
+            
+            # 4. Play Audio + Lip Sync
+            await self._play_audio_response(message, audio_file, response_text)
+            
+            return True
+        
         except Exception as e:
-            logger.debug(f"VTS disconnect error: {e}")
-
+            logger.error(f"❌ Process message error: {e}", exc_info=True)
+            return False
+    
+    async def _play_audio_response(
+        self,
+        message: QueuedMessage,
+        audio_file: str,
+        text: str
+    ):
+        """เล่นเสียงตอบกลับ"""
         try:
-            if self.discord_bot and getattr(self.discord_bot, "stop", None):
-                await self.discord_bot.stop()
+            # Discord Voice
+            if message.source == MessageSource.DISCORD_VOICE or message.source == MessageSource.DISCORD_TEXT:
+                voice_client = message.metadata.get("voice_client")
+                
+                if voice_client and voice_client.is_connected():
+                    logger.info("🔊 เล่นเสียงใน Discord...")
+                    await self.audio_player.play_audio_with_lipsync(
+                        voice_client,
+                        audio_file,
+                        text
+                    )
+                else:
+                    logger.warning("⚠️ Voice client ไม่ได้เชื่อมต่อ")
+            
+            # YouTube Live (เล่นเสียงใน local หรือ stream)
+            elif message.source == MessageSource.YOUTUBE_CHAT:
+                logger.info("🔊 เล่นเสียงสำหรับ YouTube...")
+                # TODO: Implement YouTube audio playback
+                # อาจต้องเล่นเสียงใน local หรือ stream ไปยัง OBS
+                pass
+        
         except Exception as e:
-            logger.debug(f"Discord stop error: {e}")
-
+            logger.error(f"❌ Play audio error: {e}", exc_info=True)
+    
+    async def start(self):
+        """เริ่มระบบทั้งหมด"""
+        if not await self.initialize():
+            logger.error("❌ ไม่สามารถเริ่มระบบได้")
+            return
+        
+        self.is_running = True
+        
+        # เริ่ม Queue Manager
+        self.queue_manager.start(self.process_message)
+        logger.info("✅ Queue Manager เริ่มทำงาน")
+        
+        # เริ่ม YouTube Live
+        if self.youtube_adapter:
+            await self.youtube_adapter.start()
+        
+        # เริ่ม Discord Bot (background task)
+        discord_task = None
+        if self.discord_bot:
+            discord_task = asyncio.create_task(self.discord_bot.start())
+            logger.info("✅ Discord Bot task started")
+        
+        logger.info("=" * 60)
+        logger.info("✅ ระบบเริ่มทำงานเรียบร้อย!")
+        logger.info("=" * 60)
+        
+        # รอจนกว่าจะหยุด
         try:
-            if self.youtube and getattr(self.youtube, "stop", None):
-                await self.youtube.stop()
-        except Exception as e:
-            logger.debug(f"YouTube stop error: {e}")
-
-        logger.info("✅ ปิดระบบเรียบร้อย")
+            while self.is_running:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("\n⚠️ กำลังปิดระบบ...")
+        finally:
+            await self.stop()
+            
+            if discord_task:
+                discord_task.cancel()
+                try:
+                    await discord_task
+                except asyncio.CancelledError:
+                    pass
+    
+    async def stop(self):
+        """หยุดระบบทั้งหมด"""
+        logger.info("🛑 กำลังปิดระบบ...")
+        
+        self.is_running = False
+        
+        # หยุด Queue Manager
+        await self.queue_manager.stop()
+        
+        # หยุด YouTube
+        if self.youtube_adapter:
+            await self.youtube_adapter.stop()
+        
+        # หยุด Discord
+        if self.discord_bot:
+            await self.discord_bot.stop()
+        
+        # หยุด Motion Controller
+        if self.motion_controller:
+            await self.motion_controller.stop()
+        
+        # หยุด VTS Client
+        if self.vts_client:
+            await self.vts_client.disconnect()
+        
+        logger.info("✅ ระบบปิดเรียบร้อย")
 
 
 async def main():
+    """Main entry point"""
     orchestrator = AIVTuberOrchestrator()
     await orchestrator.start()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("\n👋 ปิดโปรแกรมด้วย Ctrl+C")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-
-    # ---------- Enhanced Emotion Detection System ----------
-def _is_positive(text: str) -> bool:
-    """Detect positive emotions in both Thai and English"""
-    t = (text or "").lower()
-    # Thai positive keywords
-    thai_positive = ["ดี", "เยี่ยม", "สุดยอด", "ขอบคุณ", "โอเค", "ยินดี", "ชอบ", "หัวเราะ", "สนุก", 
-                     "มีความสุข", "ดีใจ", "รัก", "น่ารัก", "เก่ง", "เจ๋ง", "วิเศษ", "ยอดเยี่ยม"]
-    # English positive keywords
-    english_positive = ["good", "great", "excellent", "awesome", "amazing", "wonderful", "fantastic", 
-                       "love", "like", "happy", "joy", "smile", "laugh", "fun", "nice", "cool", "perfect"]
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
-    for kw in thai_positive + english_positive:
-        if kw in t:
-            return True
-    return False
-
-def _is_negative(text: str) -> bool:
-    """Detect negative emotions in both Thai and English"""
-    t = (text or "").lower()
-    # Thai negative keywords
-    thai_negative = ["เศร้า", "เสียใจ", "ไม่ดี", "แย่", "หดหู่", "เหงา", "ร้องไห้", "ผิดหวัง", 
-                     "น่าเศร้า", "เสียดาย", "ท้อ", "หมดหวัง"]
-    # English negative keywords
-    english_negative = ["sad", "bad", "terrible", "awful", "disappointed", "upset", "cry", "crying", 
-                       "depressed", "lonely", "hurt", "pain", "sorry", "regret"]
-    
-    for kw in thai_negative + english_negative:
-        if kw in t:
-            return True
-    return False
-
-def _is_angry(text: str) -> bool:
-    """Detect anger in both Thai and English"""
-    t = (text or "").lower()
-    # Thai angry keywords
-    thai_angry = ["โกรธ", "โมโห", "เดือด", "ฉุน", "หงุดหงิด", "รำคาญ", "เบื่อ", "ขุ่นข้อง"]
-    # English angry keywords
-    english_angry = ["angry", "mad", "furious", "annoyed", "irritated", "frustrated", "rage", 
-                    "hate", "damn", "stupid", "idiot", "shut up"]
-    
-    for kw in thai_angry + english_angry:
-        if kw in t:
-            return True
-    return False
-
-def _is_surprised(text: str) -> bool:
-    """Detect surprise in both Thai and English"""
-    t = (text or "").lower()
-    # Thai surprised keywords
-    thai_surprised = ["ตกใจ", "ว้าว", "อึ้ง", "งง", "ประหลาดใจ", "แปลก", "เอ๊ะ", "หา", "โอ้"]
-    # English surprised keywords
-    english_surprised = ["wow", "omg", "oh my", "surprised", "shocked", "amazing", "incredible", 
-                        "unbelievable", "what", "really", "seriously", "no way"]
-    
-    for kw in thai_surprised + english_surprised:
-        if kw in t:
-            return True
-    return False
-
-def _is_thinking(text: str) -> bool:
-    """Detect thinking/contemplative state"""
-    t = (text or "").lower()
-    # Thai thinking keywords
-    thai_thinking = ["คิด", "ใคร่ครวญ", "ตรึกตรอง", "สงสัย", "สำคัญ", "ยาก", "ซับซ้อน", "ลึกซึ้ง"]
-    # English thinking keywords
-    english_thinking = ["think", "thinking", "wonder", "wondering", "consider", "hmm", "hm", 
-                       "complex", "difficult", "interesting", "question", "why", "how"]
-    
-    for kw in thai_thinking + english_thinking:
-        if kw in t:
-            return True
-    return False
-
-def _detect_energy_level(text: str) -> float:
-    """Detect energy level from text intensity markers"""
-    t = (text or "").lower()
-    
-    # High energy indicators
-    high_energy = ["มาก", "สุด", "เร็ว", "แรง", "ตื่นเต้น", "กระตือรือร้น", "very", "extremely", 
-                   "super", "really", "so", "totally", "absolutely", "!!!", "wow", "amazing"]
-    
-    # Low energy indicators  
-    low_energy = ["นิดหน่อย", "เบาๆ", "ช้า", "ค่อยๆ", "เงียบๆ", "slightly", "little", "bit", 
-                  "quietly", "softly", "gently", "maybe", "perhaps"]
-    
-    # Count exclamation marks and caps for energy
-    exclamation_count = t.count('!')
-    caps_ratio = sum(1 for c in text if c.isupper()) / max(1, len(text))
-    
-    energy_score = 0.6  # baseline
-    
-    # Adjust based on keywords
-    for kw in high_energy:
-        if kw in t:
-            energy_score += 0.15
-    
-    for kw in low_energy:
-        if kw in t:
-            energy_score -= 0.15
-    
-    # Adjust based on punctuation and caps
-    energy_score += min(0.2, exclamation_count * 0.1)
-    energy_score += min(0.15, caps_ratio * 0.3)
-    
-    return max(0.2, min(1.0, energy_score))
-
-def _detect_context_mood(text: str) -> str:
-    """Detect contextual mood from message content"""
-    t = (text or "").lower()
-    
-    # Question context
-    if any(marker in t for marker in ["?", "ไหม", "หรือ", "อะไร", "ทำไม", "อย่างไร", "what", "how", "why", "when", "where"]):
-        return "curious"
-    
-    # Greeting context
-    if any(marker in t for marker in ["สวัสดี", "หวัดดี", "ไง", "hello", "hi", "hey", "good morning", "good evening"]):
-        return "friendly"
-    
-    # Compliment context
-    if any(marker in t for marker in ["สวย", "หล่อ", "เก่ง", "เจ๋ง", "beautiful", "handsome", "smart", "clever", "good job"]):
-        return "pleased"
-    
-    return "neutral"
-
-def _infer_comprehensive_mood(text: str, response: str = "") -> tuple[str, float, dict]:
-    """
-    Comprehensive mood inference that considers input text, response context, and situational factors
-    Returns: (primary_mood, energy_level, mood_details)
-    """
-    # Analyze both input and response
-    combined_text = f"{text} {response}".strip()
-    
-    # Primary emotion detection (priority order matters)
-    if _is_angry(combined_text):
-        primary_mood = "angry"
-    elif _is_surprised(combined_text):
-        primary_mood = "surprised"  
-    elif _is_negative(combined_text):
-        primary_mood = "sad"
-    elif _is_thinking(combined_text):
-        primary_mood = "thinking"
-    elif _is_positive(combined_text):
-        primary_mood = "happy"
-    else:
-        # Default to happy with wide smile as specified
-        primary_mood = "happy"
-    
-    # Detect energy level
-    energy_level = _detect_energy_level(combined_text)
-    
-    # Detect contextual mood
-    context_mood = _detect_context_mood(text)
-    
-    # Create detailed mood information
-    mood_details = {
-        "primary": primary_mood,
-        "context": context_mood,
-        "energy": energy_level,
-        "is_question": "?" in text or any(q in text.lower() for q in ["ไหม", "หรือ", "what", "how", "why"]),
-        "is_greeting": any(g in text.lower() for g in ["สวัสดี", "หวัดดี", "hello", "hi"]),
-        "intensity_markers": {
-            "exclamations": text.count("!"),
-            "caps_ratio": sum(1 for c in text if c.isupper()) / max(1, len(text)),
-            "length": len(text)
-        }
-    }
-    
-    return primary_mood, energy_level, mood_details
-
-# Legacy functions for backward compatibility
-def _mood_from_text(text: str) -> str:
-    mood, _, _ = _infer_comprehensive_mood(text)
-    return mood
-
-def _energy_hint(text: str) -> float:
-    _, energy, _ = _infer_comprehensive_mood(text)
-    return energy
-
-def _infer_mood(text: str) -> tuple[str, float]:
-    mood, energy, _ = _infer_comprehensive_mood(text)
-    return mood, energy
+    # Run
+    asyncio.run(main())
