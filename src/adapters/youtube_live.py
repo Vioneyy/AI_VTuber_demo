@@ -104,40 +104,46 @@ class YouTubeLiveAdapter:
         """Real Chat Loop: อ่านแชทจาก YouTube Live จริง"""
         try:
             import pytchat
-            
+
             chat = pytchat.create(video_id=self.stream_id)
             logger.info(f"📺 เชื่อมต่อ YouTube Live: {self.stream_id}")
             
             while not self.should_stop and chat.is_alive():
                 try:
-                    for c in chat.get().sync_items():
+                    items = chat.get().sync_items()
+                    pending_questions = []
+                    for c in items:
                         if self.should_stop:
                             break
-                        
+
                         author = c.author.name
                         message = c.message
-                        
+
                         logger.info(f"💬 [YT] {author}: {message}")
-                        
-                        is_question = self._is_question(message)
-                        
-                        if is_question:
-                            from src.core.scheduler import Message
-                            
-                            msg_obj = Message(
+
+                        if self._is_question(message):
+                            pending_questions.append((author, message))
+                        else:
+                            logger.debug(f"⏭️ [YT] ข้ามข้อความที่ไม่ใช่คำถาม")
+
+                    # อ่านครบหนึ่งรอบแล้วจึงค่อยส่งเข้าคิวตามเงื่อนไขที่ต้องเป็นคำถาม
+                    if pending_questions:
+                        from src.core.types import IncomingMessage, MessageSource
+                        for author, message in pending_questions:
+                            msg_obj = IncomingMessage(
                                 priority=5,
-                                source="youtube",
+                                source=MessageSource.YOUTUBE,
                                 is_question=True,
                                 author=author,
                                 text=message,
-                                channel_id=self.stream_id
+                                meta={"channel_id": self.stream_id}
                             )
-                            
-                            await self.orchestrator.scheduler.add_message(msg_obj)
-                            logger.info(f"📨 [YT] ส่งคำถามเข้าคิว")
-                        else:
-                            logger.debug(f"⏭️ [YT] ข้ามข้อความที่ไม่ใช่คำถาม")
-                    
+                            try:
+                                await self.orchestrator.scheduler.enqueue(msg_obj)
+                            except Exception as e:
+                                logger.error(f"enqueue error: {e}", exc_info=True)
+                        logger.info(f"📨 [YT] ส่งคำถามเข้าคิว {len(pending_questions)} รายการหลังอ่านครบหนึ่งรอบ")
+
                     await asyncio.sleep(1)
                     
                 except Exception as e:
@@ -169,3 +175,6 @@ def create_youtube_adapter(orchestrator):
     """สร้าง YouTube adapter จาก config"""
     stream_id = os.getenv("YOUTUBE_STREAM_ID")
     return YouTubeLiveAdapter(orchestrator, stream_id)
+
+# Alias ให้ Orchestrator เรียกชื่อ YouTubeAdapter ได้
+YouTubeAdapter = YouTubeLiveAdapter
