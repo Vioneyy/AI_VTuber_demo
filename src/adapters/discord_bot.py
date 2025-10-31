@@ -13,6 +13,10 @@ from typing import Optional
 import discord
 from discord.ext import commands
 from discord import FFmpegPCMAudio
+from discord import sinks as discord_sinks
+
+from src.audio.stt_whispercpp import WhisperCppSTT
+from src.core.types import IncomingMessage, MessageSource
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,11 @@ class DiscordBotAdapter:
         self.voice_client: Optional[discord.VoiceClient] = None
         self._running = False
         self._play_lock = asyncio.Lock()
+        self._stt_enabled = os.getenv("DISCORD_VOICE_STT_ENABLED", "0").lower() in ("1", "true", "yes")
+        self._stt_chunk_sec = float(os.getenv("DISCORD_STT_CHUNK_SECONDS", "5"))
+        self._stt_lang = os.getenv("WHISPER_CPP_LANG", "th")
+        self._stt_task: Optional[asyncio.Task] = None
+        self._stt_engine: Optional[WhisperCppSTT] = None
 
     async def start_bot(self, token: str):
         intents = discord.Intents.default()
@@ -86,6 +95,15 @@ class DiscordBotAdapter:
                             if not (self.voice_client and self.voice_client.is_connected()):
                                 self.voice_client = await chan.connect()
                                 logger.info(f"✅ Joined voice channel: {chan.name}")
+                                # start STT loop if enabled
+                                if self._stt_enabled:
+                                    try:
+                                        self._stt_engine = WhisperCppSTT()
+                                        if not self._stt_task or self._stt_task.done():
+                                            self._stt_task = asyncio.create_task(self._stt_loop())
+                                            logger.info("🎤 STT loop started (Discord voice)")
+                                    except Exception as e:
+                                        logger.error(f"Failed to start STT loop: {e}", exc_info=True)
                         except Exception as e:
                             logger.error(f"Failed to join voice channel: {e}", exc_info=True)
                 except Exception as e:
@@ -205,7 +223,78 @@ class DiscordBotAdapter:
                     await self.voice_client.disconnect()
                 except Exception:
                     pass
+            if self._stt_task and not self._stt_task.done():
+                try:
+                    self._stt_task.cancel()
+                except Exception:
+                    pass
             if self.bot and self._running:
                 await self.bot.close()
         except Exception as e:
             logger.debug(f"Discord stop error: {e}", exc_info=True)
+
+    async def _stt_loop(self):
+        """
+        Chunked recording loop using Pycord sinks to capture short segments,
+        transcribe with whisper.cpp, and enqueue to scheduler immediately.
+        """
+        if not self.voice_client:
+            return
+        while True:
+            try:
+                # start recording a short chunk
+                sink = discord_sinks.WaveSink()
+
+                def _finished_callback(sink_: discord_sinks.Sink, *args, **kwargs):
+                    try:
+                        # Iterate per-user audio data
+                        for user, audio in getattr(sink_, "audio_data", {}).items():
+                            fpath = getattr(audio, "file", None)
+                            if not fpath:
+                                continue
+                            try:
+                                transcript = self._stt_engine.transcribe_file(fpath, language=self._stt_lang) if self._stt_engine else ""
+                            except Exception:
+                                transcript = ""
+                            # Clean up file afterwards
+                            try:
+                                os.remove(fpath)
+                            except Exception:
+                                pass
+                            if transcript:
+                                # Enqueue as high-priority Discord message; answer immediately
+                                try:
+                                    msg = IncomingMessage(
+                                        text=transcript,
+                                        source=MessageSource.DISCORD,
+                                        author=str(getattr(user, "name", getattr(user, "display_name", "unknown"))),
+                                        is_question=True,  # treat voice queries as questions
+                                        priority=0,
+                                        meta={"stt": "whisper.cpp", "lang": self._stt_lang}
+                                    )
+                                    if self.orchestrator and self.orchestrator.scheduler:
+                                        asyncio.create_task(self.orchestrator.scheduler.enqueue(msg))
+                                except Exception as e:
+                                    logger.error(f"Failed to enqueue STT message: {e}", exc_info=True)
+
+                    except Exception as e:
+                        logger.error(f"STT finished callback error: {e}", exc_info=True)
+
+                try:
+                    self.voice_client.start_recording(sink, _finished_callback)
+                except Exception as e:
+                    logger.error(f"start_recording failed: {e}", exc_info=True)
+                    await asyncio.sleep(1.0)
+                    continue
+
+                await asyncio.sleep(max(1.0, self._stt_chunk_sec))
+                try:
+                    self.voice_client.stop_recording()
+                except Exception as e:
+                    logger.error(f"stop_recording failed: {e}", exc_info=True)
+                    await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"STT loop error: {e}", exc_info=True)
+                await asyncio.sleep(1.0)
