@@ -1,16 +1,3 @@
-import asyncio
-import logging
-import os
-import sys
-from pathlib import Path
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)-8s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
-
 async def process_message(self, message: dict):
     """ประมวลผล message แต่ละอัน"""
     source = message['source']
@@ -106,41 +93,3 @@ async def process_message(self, message: dict):
     except Exception as e:
         logger.error(f"❌ Process message error: {e}", exc_info=True)
         raise
-
-
-# --- Standalone entrypoint ---
-def _ensure_project_root_on_path():
-    """ทำให้สามารถ import โมดูลจากแพ็กเกจ src ได้เมื่อรันไฟล์นี้โดยตรง"""
-    project_root = Path(__file__).resolve().parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-
-def _import_run():
-    """พยายาม import ฟังก์ชัน run_vts_demo จาก main โดยรองรับทั้งแพ็กเกจและสคริปต์"""
-    try:
-        # เมื่อมีโครงสร้างแพ็กเกจ src
-        from src.main import run_vts_demo
-        return run_vts_demo
-    except ModuleNotFoundError:
-        # เมื่อรันจากในโฟลเดอร์ src โดยตรง
-        from main import run_vts_demo
-        return run_vts_demo
-
-
-if __name__ == "__main__":
-    _ensure_project_root_on_path()
-    run_vts_demo = _import_run()
-
-    import argparse
-    parser = argparse.ArgumentParser(description="Run AI VTuber demo standalone")
-    parser.add_argument("--duration", type=float, default=25.0, help="เวลารัน motion (วินาที), 0 = ต่อเนื่อง")
-    args = parser.parse_args()
-
-    logger.info("🚀 เริ่มรัน AI VTuber demo แบบเดี่ยวผ่าน ai_vtuber.py")
-    try:
-        asyncio.run(run_vts_demo(duration_sec=args.duration))
-    except KeyboardInterrupt:
-        logger.info("🛑 หยุดโดยผู้ใช้ (Ctrl+C)")
-    except Exception as e:
-        logger.exception(f"เกิดข้อผิดพลาดระหว่างการรัน: {e}")
