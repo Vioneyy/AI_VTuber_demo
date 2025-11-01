@@ -39,6 +39,15 @@
 [Discord] Bot disconnected from voice channel
 ```
 
+### Terminal Snapshot #1–8 (ตามที่ผู้ใช้ระบุ)
+```
+PS D:\AI_VTuber_demo> & d:/AI_VTuber_demo/.venv/Scripts/Activate.ps1
+(.venv) PS D:\AI_VTuber_demo> & d:/AI_VTuber_demo/.venv/Scripts/python.exe d:/AI_VTuber_demo/src/ai_vtuber.py
+(.venv) PS D:\AI_VTuber_demo> & d:/AI_VTuber_demo/.venv/Scripts/python.exe d:/AI_VTuber_demo/src/ai_vtuber.py
+(.venv) PS D:\AI_VTuber_demo>
+```
+หมายเหตุ: บรรทัดที่ 8 คือ prompt ที่ว่าง (idle) หลังรันคำสั่ง
+
 ## ข้อความแจ้งเตือนใน Discord (ตัวอย่าง)
 - `Voice invalid session (4006). โปรดตรวจ firewall/UDP และลองใหม่`
 
