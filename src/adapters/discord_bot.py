@@ -5,6 +5,14 @@ import logging
 from typing import Optional
 import io
 
+# Import admin + safety systems (support both package and module run modes)
+try:
+    from core.admin_commands import get_admin_handler
+    from core.safety_filter import get_safety_filter
+except ModuleNotFoundError:
+    from src.core.admin_commands import get_admin_handler
+    from src.core.safety_filter import get_safety_filter
+
 logger = logging.getLogger(__name__)
 
 class DiscordBot:
@@ -19,6 +27,8 @@ class DiscordBot:
         self.audio_player = audio_player
         self.queue_manager = queue_manager
         self.voice_client: Optional[discord.VoiceClient] = None
+        self.admin_handler = get_admin_handler()
+        self.safety_filter = get_safety_filter()
         
         self._setup_events()
         self._setup_commands()
@@ -89,6 +99,42 @@ class DiscordBot:
                 }
             )
 
+        # === Admin commands ===
+        @self.bot.command(name='unlock')
+        async def unlock(ctx, code: str):
+            """ปลดล็อคการเปิดเผยข้อมูลโปรเจค: !unlock <code> (เฉพาะ owner)"""
+            await self._run_admin_command(ctx, 'unlock', [code])
+
+        @self.bot.command(name='lock')
+        async def lock(ctx):
+            """ล็อคการเปิดเผยข้อมูลโปรเจค (เฉพาะ owner)"""
+            await self._run_admin_command(ctx, 'lock', [])
+
+        @self.bot.command(name='status')
+        async def status(ctx):
+            """ดูสถานะระบบ"""
+            await self._run_admin_command(ctx, 'status', [])
+
+        @self.bot.command(name='queue')
+        async def queue(ctx):
+            """ดูคิวข้อความ"""
+            await self._run_admin_command(ctx, 'queue', [])
+
+        @self.bot.command(name='approve')
+        async def approve(ctx, approval_id: str):
+            """อนุมัติคำขอ: !approve <approval_id> (เฉพาะ admin)"""
+            await self._run_admin_command(ctx, 'approve', [approval_id])
+
+        @self.bot.command(name='reject')
+        async def reject(ctx, approval_id: str):
+            """ปฏิเสธคำขอ: !reject <approval_id> (เฉพาะ admin)"""
+            await self._run_admin_command(ctx, 'reject', [approval_id])
+
+        @self.bot.command(name='skip')
+        async def skip(ctx):
+            """ข้ามข้อความปัจจุบันในคิว (เฉพาะ admin)"""
+            await self._run_admin_command(ctx, 'skip', [])
+
     async def play_audio(self, audio_data: bytes, voice_client: discord.VoiceClient):
         """เล่นเสียงใน Discord voice channel"""
         if not voice_client or not voice_client.is_connected():
@@ -146,3 +192,24 @@ class DiscordBot:
             await self.voice_client.disconnect(force=True)
         await self.bot.close()
         logger.info("✅ Discord bot stopped")
+
+    async def _run_admin_command(self, ctx, command: str, args: list):
+        """Helper: เรียกใช้ระบบ admin command แล้วส่งผลลัพธ์กลับไปใน Discord"""
+        try:
+            # ดึง queue manager ที่มี get_status (QueueBridge มี base เป็น SequentialQueueManager)
+            queue_for_status = getattr(self.queue_manager, 'base', self.queue_manager)
+
+            user_id = str(getattr(ctx.author, 'id', ''))
+            context = {
+                'safety_filter': self.safety_filter,
+                'queue_manager': queue_for_status,
+            }
+            result = await self.admin_handler.handle_command(command, args, user_id, context)
+            if result:
+                await ctx.send(result)
+        except Exception as e:
+            logger.error(f"❌ Admin command error: {e}", exc_info=True)
+            try:
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+            except Exception:
+                pass
