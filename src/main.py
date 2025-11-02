@@ -1,6 +1,6 @@
 """
-ไฟล์หลัก AI VTuber - Jeed
-ตำแหน่ง: src/main.py (เขียนใหม่ทั้งหมด)
+ไฟล์หลัก AI VTuber - Jeed (แก้ Event Loop ให้ถูกต้อง)
+ตำแหน่ง: src/main.py
 """
 
 import asyncio
@@ -8,10 +8,12 @@ import sys
 import time
 from pathlib import Path
 
-# โหลด .env ให้เร็วที่สุดก่อน import config
+# โหลด .env ให้แน่ใจว่าอ่านจากไฟล์จริงที่รากโปรเจกต์
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # รากโปรเจกต์ = พ่อของโฟลเดอร์ src
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    load_dotenv(PROJECT_ROOT / ".env")
 except Exception:
     pass
 
@@ -20,13 +22,13 @@ sys.path.append(str(Path(__file__).parent))
 
 # Import ทุกอย่าง
 from core.config import config
-from core.queue_manager import queue_manager, Message, MessageSource
+from core.queue_manager import queue_manager
 from core.safety_filter import safety_filter, FilterResult
 from personality.jeed_persona import jeed_persona, JeedPersona
 from llm.llm_handler import llm_handler
 from audio.stt_handler import stt_handler
 from audio.tts_rvc_handler import tts_rvc_handler
-from adapters.discord_bot import discord_bot, run_discord_bot
+from adapters.discord_bot import discord_bot
 from adapters.vts.vtube_controller import vtube_controller, AnimationState
 
 class JeedAIVTuber:
@@ -35,6 +37,7 @@ class JeedAIVTuber:
     def __init__(self):
         self.running = False
         self.processing_task = None
+        self.discord_task = None
         
     async def start(self):
         """เริ่มระบบทั้งหมด"""
@@ -53,11 +56,11 @@ class JeedAIVTuber:
         print("\n📡 เชื่อมต่อ VTube Studio...")
         vts_connected = await vtube_controller.connect()
         if not vts_connected:
-            print("⚠️ เชื่อมต่อ VTube Studio ล้มเหลว (ข้ามไป)")
+            print("⚠️ เชื่อมต่อ VTube Studio ล้มเหลว")
         
-        # เริ่ม Discord Bot
+        # เริ่ม Discord Bot (ใน background task)
         print("\n🤖 เริ่ม Discord Bot...")
-        asyncio.create_task(run_discord_bot())
+        self.discord_task = asyncio.create_task(self._run_discord_bot())
         
         # รอให้ Discord Bot พร้อม
         await asyncio.sleep(3)
@@ -72,14 +75,27 @@ class JeedAIVTuber:
         print("คำสั่ง Discord Bot:")
         print("  !join      - เข้าห้องเสียง")
         print("  !leave     - ออกจากห้องเสียง")
-        print("  !stt [วินาที] - บันทึกเสียงและถอดความ")
-        print("  !collab on/off - เปิด/ปิดโหมดคอแลป")
-        print("  !youtube on/off - เปิด/ปิดคอมเม้น YouTube")
+        print("  !test      - ทดสอบบอท")
+        print("  !ping      - ตรวจสอบ latency")
         print("  !stats     - แสดงสถิติ")
         print("  !clear     - ล้างคิว")
         print("="*60 + "\n")
         
         return True
+    
+    async def _run_discord_bot(self):
+        """รัน Discord bot แยก task"""
+        try:
+            if not config.discord.token:
+                print("❌ ไม่พบ DISCORD_BOT_TOKEN")
+                return
+            
+            await discord_bot.start(config.discord.token)
+            
+        except Exception as e:
+            print(f"❌ Discord Bot Error: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _processing_loop(self):
         """Loop หลักประมวลผลคำถาม"""
@@ -100,12 +116,18 @@ class JeedAIVTuber:
                 # เสร็จสิ้น
                 queue_manager.finish_processing()
                 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 print(f"❌ Processing Error: {e}")
+                import traceback
+                traceback.print_exc()
                 queue_manager.finish_processing()
                 await asyncio.sleep(1)
+        
+        print("🛑 Processing Loop หยุดทำงาน")
     
-    async def _process_message(self, message: Message):
+    async def _process_message(self, message):
         """ประมวลผลข้อความ"""
         start_time = time.time()
         
@@ -123,8 +145,7 @@ class JeedAIVTuber:
                 print(f"🚫 บล็อกเนื้อหา: {reason}")
                 response = safety_filter.create_safe_response(filter_result, reason)
                 
-                # ส่งคำตอบกลับ (ไม่พูดออกเสียง)
-                if message.channel_id:
+                if message.channel_id and discord_bot.is_ready:
                     await discord_bot.send_message(message.channel_id, response)
                 
                 return
@@ -133,14 +154,14 @@ class JeedAIVTuber:
                 print(f"🔐 ต้องขออนุญาต: {reason}")
                 response = safety_filter.create_safe_response(filter_result, reason)
                 
-                if message.channel_id:
+                if message.channel_id and discord_bot.is_ready:
                     await discord_bot.send_message(message.channel_id, response)
                 
-                # TODO: รอการอนุญาต
                 return
             
             # 2. เปลี่ยนสถานะเป็น THINKING
-            await vtube_controller.set_state(AnimationState.THINKING)
+            if vtube_controller.running:
+                await vtube_controller.set_state(AnimationState.THINKING)
             
             # 3. สร้างคำตอบจาก LLM
             response = await llm_handler.generate_response(message.content)
@@ -151,22 +172,26 @@ class JeedAIVTuber:
             
             print(f"💬 คำตอบ: {response}")
             
-            # 4. ส่งข้อความกลับ (ถ้าเป็น text)
-            if message.source == MessageSource.DISCORD_TEXT:
+            # 4. ส่งข้อความกลับ
+            if message.channel_id and discord_bot.is_ready:
                 await discord_bot.send_message(message.channel_id, response)
             
             # 5. สร้างเสียง TTS + RVC
-            await vtube_controller.start_speaking(response)
+            if vtube_controller.running:
+                await vtube_controller.start_speaking(response)
             
             audio_data, audio_path = await tts_rvc_handler.generate_speech(response)
             
             if audio_path:
                 # 6. เล่นเสียง
-                await discord_bot.play_audio(audio_path, message.channel_id)
-                
-                # รอให้พูดเสร็จ
-                duration = tts_rvc_handler.estimate_duration(response)
-                await asyncio.sleep(duration)
+                if discord_bot.voice_client and discord_bot.voice_client.is_connected():
+                    await discord_bot.play_audio(audio_path, message.channel_id)
+                    
+                    # รอให้เล่นเสร็จ
+                    duration = tts_rvc_handler.estimate_duration(response)
+                    await asyncio.sleep(duration + 0.5)
+                else:
+                    print("⚠️ ไม่ได้เชื่อมต่อห้องเสียง (ใช้ !join เพื่อเข้าห้อง)")
                 
                 # ลบไฟล์ชั่วคราว
                 try:
@@ -175,13 +200,13 @@ class JeedAIVTuber:
                     pass
             
             # 7. หยุดพูด
-            await vtube_controller.stop_speaking()
+            if vtube_controller.running:
+                await vtube_controller.stop_speaking()
             
             # แสดงเวลาประมวลผล
             elapsed = time.time() - start_time
             print(f"\n✅ ประมวลผลเสร็จ ({elapsed:.2f}s)")
             
-            # ตรวจสอบว่าเกิน 10 วินาทีหรือไม่
             if elapsed > config.system.max_processing_time:
                 print(f"⚠️ ใช้เวลานานเกินไป! ({elapsed:.2f}s > {config.system.max_processing_time}s)")
             
@@ -196,11 +221,29 @@ class JeedAIVTuber:
         
         self.running = False
         
+        # หยุด processing loop
         if self.processing_task:
             self.processing_task.cancel()
+            try:
+                await self.processing_task
+            except asyncio.CancelledError:
+                pass
         
-        await vtube_controller.disconnect()
-        await discord_bot.close()
+        # ตัดการเชื่อมต่อ VTube Studio
+        if vtube_controller.running:
+            await vtube_controller.disconnect()
+        
+        # ปิด Discord bot
+        if discord_bot.is_ready:
+            await discord_bot.close()
+        
+        # หยุด Discord task
+        if self.discord_task:
+            self.discord_task.cancel()
+            try:
+                await self.discord_task
+            except asyncio.CancelledError:
+                pass
         
         print("👋 ระบบหยุดแล้ว")
 
@@ -219,19 +262,33 @@ async def main():
         while True:
             await asyncio.sleep(1)
             
+            # ตรวจสอบว่า tasks ยังทำงานอยู่หรือไม่
+            if jeed.discord_task and jeed.discord_task.done():
+                print("⚠️ Discord Bot หยุดทำงาน")
+                break
+            
+            if jeed.processing_task and jeed.processing_task.done():
+                print("⚠️ Processing Loop หยุดทำงาน")
+                break
+            
     except KeyboardInterrupt:
         print("\n\n⚠️ ได้รับสัญญาณหยุด (Ctrl+C)")
-        await jeed.stop()
     
     except Exception as e:
         print(f"\n❌ Fatal Error: {e}")
         import traceback
         traceback.print_exc()
+    
+    finally:
         await jeed.stop()
 
 if __name__ == "__main__":
-    # รัน async main
     try:
+        # ใช้ asyncio.run() เพื่อสร้าง event loop เดียว
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 บ๊ายบาย~")
+    except Exception as e:
+        print(f"\n❌ Startup Error: {e}")
+        import traceback
+        traceback.print_exc()
