@@ -1,17 +1,35 @@
-websockets
-python-dotenv
-openai
-py-cord
-PyNaCl
-pytchat
-numpy
-f5-tts-th
-huggingface_hub
-torch
-torchaudio
-gtts
-pydub
+# ==========================================
+# Jeed AI VTuber - Python Dependencies
+# ==========================================
 
-# หมายเหตุ:
-# - ต้องมี ffmpeg ติดตั้งในระบบสำหรับเล่นเสียงผ่าน Discord (FFmpegPCMAudio)
-# - Whisper.cpp ใช้ไบนารีภายนอก ไม่ใช่แพ็กเกจ Python (ตั้งค่าใน .env)
+# Core
+python-dotenv==1.0.0
+asyncio==3.4.3
+
+# Discord
+discord.py==2.3.2
+discord-ext-voice-recv==0.1.0
+
+# OpenAI
+openai==1.12.0
+
+# Audio Processing
+numpy==1.24.3
+soundfile==0.12.1
+noisereduce==3.0.0
+scipy==1.11.4
+
+# TTS (F5-TTS)
+torch==2.1.2
+torchaudio==2.1.2
+# f5-tts  # ต้องติดตั้งแยก: pip install git+https://github.com/...
+
+# RVC (Voice Conversion)
+# rvc-python  # ต้องติดตั้งแยก
+
+# VTube Studio
+websockets==12.0
+
+# Utilities
+aiohttp==3.9.3
+pydantic==2.5.3

@@ -1,22 +1,14 @@
 """
-__init__.py - VTS Package
+สร้างไฟล์ __init__.py ในทุกโฟลเดอร์ (ไฟล์ว่างเปล่า)
+
+ตำแหน่งที่ต้องสร้าง:
+- src/__init__.py
+- src/core/__init__.py
+- src/personality/__init__.py
+- src/llm/__init__.py
+- src/audio/__init__.py
+- src/adapters/__init__.py
+- src/adapters/vts/__init__.py
 """
 
-from .config import SystemConfig, DEFAULT_CONFIG
-from .motion_controller import VTSMotionController, EmotionType
-from .lipsync_system import LipSyncController, SimpleLipSyncFromTTS
-from .vts_integration import CompleteVTuberSystem
-from .vts_client import VTSClient
-
-__version__ = "1.0.0"
-
-__all__ = [
-    'SystemConfig',
-    'DEFAULT_CONFIG',
-    'VTSMotionController',
-    'EmotionType',
-    'LipSyncController',
-    'SimpleLipSyncFromTTS',
-    'CompleteVTuberSystem',
-    'VTSClient'
-]
+# ไฟล์นี้ว่างเปล่า แค่บอกให้ Python รู้ว่านี่คือ package

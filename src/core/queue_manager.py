@@ -1,132 +1,198 @@
 """
-queue_manager.py - Sequential Message Queue Manager
-จัดการคิวข้อความแบบลำดับ (ตอบทีละข้อความ)
+ระบบจัดการคิวคำถาม พร้อมลำดับความสำคัญ
+ตำแหน่ง: src/core/queue_manager.py (สร้างใหม่)
+แทนที่: src/core/scheduler.py (ลบไฟล์เก่า)
 """
 
 import asyncio
-import logging
-from typing import Optional, Dict, Any
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from typing import Optional, List
 from enum import Enum
-
-logger = logging.getLogger(__name__)
-
+from datetime import datetime
 
 class MessageSource(Enum):
     """แหล่งที่มาของข้อความ"""
     DISCORD_VOICE = "discord_voice"
     DISCORD_TEXT = "discord_text"
-    YOUTUBE_CHAT = "youtube_chat"
+    YOUTUBE_COMMENT = "youtube_comment"
+    SYSTEM = "system"
 
+class MessagePriority(Enum):
+    """ลำดับความสำคัญ"""
+    HIGH = 1      # เสียงจาก Discord/Voice
+    NORMAL = 2    # ข้อความจาก Discord
+    LOW = 3       # คอมเม้น YouTube
 
 @dataclass
-class QueuedMessage:
+class Message:
     """ข้อความในคิว"""
-    text: str
+    content: str
     source: MessageSource
-    user: str
-    timestamp: float
-    metadata: Optional[Dict[str, Any]] = None
-
-
-class SequentialQueueManager:
-    """
-    จัดการคิวข้อความแบบลำดับ
-    - ประมวลผลทีละข้อความ
-    - รอให้ข้อความก่อนหน้าเสร็จก่อน
-    """
+    priority: MessagePriority
+    timestamp: float = field(default_factory=time.time)
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    channel_id: Optional[str] = None
     
-    def __init__(self):
-        self.queue: asyncio.Queue = asyncio.Queue()
-        self.is_processing = False
-        self.current_message: Optional[QueuedMessage] = None
-        self.worker_task: Optional[asyncio.Task] = None
+    def __lt__(self, other):
+        """เปรียบเทียบสำหรับ priority queue"""
+        if self.priority.value != other.priority.value:
+            return self.priority.value < other.priority.value
+        return self.timestamp < other.timestamp
+    
+    def age(self) -> float:
+        """อายุของข้อความ (วินาที)"""
+        return time.time() - self.timestamp
+
+class QueueManager:
+    """จัดการคิวคำถาม"""
+    
+    def __init__(self, max_size: int = 50, question_delay: float = 2.5):
+        self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max_size)
+        self.processing = False
+        self.current_message: Optional[Message] = None
+        self.question_delay = question_delay
+        self.last_process_time = 0
         
         # Statistics
         self.total_processed = 0
-        self.total_errors = 0
-    
-    async def add_message(self, message: QueuedMessage):
-        """เพิ่มข้อความเข้าคิว"""
-        await self.queue.put(message)
-        logger.info(f"📥 Added to queue: [{message.source.value}] {message.text[:50]}")
-    
-    async def process_queue(self, processor_func):
-        """
-        ประมวลผลคิวแบบลำดับ
-        processor_func: async function(message) -> bool
-        """
-        logger.info("🎬 Queue processor เริ่มทำงาน")
+        self.total_dropped = 0
+        self.source_counts = {source: 0 for source in MessageSource}
         
-        while True:
+        # Collab mode
+        self.collab_mode = False
+        self.youtube_enabled = True
+        
+    async def add_message(self, message: Message) -> bool:
+        """
+        เพิ่มข้อความเข้าคิว
+        Returns: True ถ้าเพิ่มสำเร็จ, False ถ้าคิวเต็ม
+        """
+        # Check if processing current message
+        if self.processing:
+            # รอให้ตอบคำถามปัจจุบันเสร็จก่อน
+            current_age = time.time() - self.last_process_time
+            if current_age < self.question_delay:
+                print(f"⏳ กำลังประมวลผล... รอ {self.question_delay - current_age:.1f}s")
+                return False
+        
+        # Check collab mode for YouTube
+        if message.source == MessageSource.YOUTUBE_COMMENT and self.collab_mode:
+            print("🎙️ โหมดคอแลป - ข้ามคอมเม้น YouTube")
+            return False
+        
+        # Check if YouTube is disabled
+        if message.source == MessageSource.YOUTUBE_COMMENT and not self.youtube_enabled:
+            return False
+        
+        # Try to add to queue
+        try:
+            self.queue.put_nowait((message.priority.value, message.timestamp, message))
+            self.source_counts[message.source] += 1
+            print(f"📥 เพิ่มข้อความ: {message.source.value} - '{message.content[:50]}...'")
+            return True
+        except asyncio.QueueFull:
+            self.total_dropped += 1
+            print(f"⚠️ คิวเต็ม! ทิ้งข้อความจาก {message.source.value}")
+            return False
+    
+    async def get_next_message(self) -> Optional[Message]:
+        """
+        ดึงข้อความถัดไปจากคิว
+        Returns: Message หรือ None ถ้าคิวว่าง
+        """
+        if self.queue.empty():
+            return None
+        
+        try:
+            _, _, message = await asyncio.wait_for(
+                self.queue.get(),
+                timeout=0.1
+            )
+            return message
+        except asyncio.TimeoutError:
+            return None
+    
+    async def process_next(self) -> Optional[Message]:
+        """
+        ประมวลผลข้อความถัดไป
+        """
+        # Check delay
+        time_since_last = time.time() - self.last_process_time
+        if time_since_last < self.question_delay:
+            await asyncio.sleep(self.question_delay - time_since_last)
+        
+        # Get next message
+        message = await self.get_next_message()
+        if not message:
+            return None
+        
+        # Mark as processing
+        self.processing = True
+        self.current_message = message
+        self.last_process_time = time.time()
+        
+        print(f"▶️ ประมวลผล: {message.source.value} - '{message.content[:50]}...'")
+        
+        return message
+    
+    def finish_processing(self):
+        """เสร็จสิ้นการประมวลผล"""
+        self.processing = False
+        self.total_processed += 1
+        self.current_message = None
+        print(f"✅ ประมวลผลเสร็จ (รวม: {self.total_processed})")
+    
+    def set_collab_mode(self, enabled: bool):
+        """ตั้งค่าโหมดคอแลป"""
+        self.collab_mode = enabled
+        status = "เปิด" if enabled else "ปิด"
+        print(f"🎤 โหมดคอแลป: {status}")
+    
+    def set_youtube_enabled(self, enabled: bool):
+        """เปิด/ปิดการรับคอมเม้น YouTube"""
+        self.youtube_enabled = enabled
+        status = "เปิด" if enabled else "ปิด"
+        print(f"📺 YouTube Comments: {status}")
+    
+    def clear_queue(self):
+        """ล้างคิวทั้งหมด"""
+        while not self.queue.empty():
             try:
-                # รอข้อความจากคิว
-                message = await self.queue.get()
-                
-                self.is_processing = True
-                self.current_message = message
-                
-                logger.info(f"▶️ Processing: [{message.source.value}] {message.text[:50]}")
-                
-                try:
-                    # ประมวลผลข้อความ
-                    success = await processor_func(message)
-                    
-                    if success:
-                        self.total_processed += 1
-                        logger.info(f"✅ Processed successfully: {message.text[:50]}")
-                    else:
-                        self.total_errors += 1
-                        logger.warning(f"⚠️ Processing failed: {message.text[:50]}")
-                
-                except Exception as e:
-                    self.total_errors += 1
-                    logger.error(f"❌ Error processing message: {e}", exc_info=True)
-                
-                finally:
-                    self.queue.task_done()
-                    self.is_processing = False
-                    self.current_message = None
-            
-            except asyncio.CancelledError:
-                logger.info("🛑 Queue processor cancelled")
+                self.queue.get_nowait()
+            except:
                 break
-            except Exception as e:
-                logger.error(f"❌ Queue processor error: {e}", exc_info=True)
+        print("🗑️ ล้างคิวเรียบร้อย")
     
-    def start(self, processor_func):
-        """เริ่มต้น queue processor"""
-        if self.worker_task is None or self.worker_task.done():
-            self.worker_task = asyncio.create_task(self.process_queue(processor_func))
-            logger.info("✅ Queue processor started")
-    
-    async def stop(self):
-        """หยุด queue processor"""
-        if self.worker_task:
-            self.worker_task.cancel()
-            try:
-                await self.worker_task
-            except asyncio.CancelledError:
-                pass
-        logger.info("✅ Queue processor stopped")
-    
-    def get_status(self) -> Dict[str, Any]:
-        """ดูสถานะคิว"""
+    def get_stats(self) -> dict:
+        """ดูสถิติการทำงาน"""
         return {
             "queue_size": self.queue.qsize(),
-            "is_processing": self.is_processing,
-            "current_message": self.current_message.text[:50] if self.current_message else None,
+            "processing": self.processing,
             "total_processed": self.total_processed,
-            "total_errors": self.total_errors
+            "total_dropped": self.total_dropped,
+            "source_counts": self.source_counts,
+            "collab_mode": self.collab_mode,
+            "youtube_enabled": self.youtube_enabled
         }
+    
+    def print_stats(self):
+        """แสดงสถิติ"""
+        stats = self.get_stats()
+        print("\n" + "="*50)
+        print("📊 Queue Manager Statistics")
+        print("="*50)
+        print(f"Queue Size: {stats['queue_size']}")
+        print(f"Processing: {stats['processing']}")
+        print(f"Total Processed: {stats['total_processed']}")
+        print(f"Total Dropped: {stats['total_dropped']}")
+        print(f"Collab Mode: {stats['collab_mode']}")
+        print(f"YouTube Enabled: {stats['youtube_enabled']}")
+        print("\nSource Counts:")
+        for source, count in stats['source_counts'].items():
+            print(f"  {source.value}: {count}")
+        print("="*50 + "\n")
 
-
-# Singleton
-_queue_manager = None
-
-def get_queue_manager() -> SequentialQueueManager:
-    """ดึง SequentialQueueManager instance"""
-    global _queue_manager
-    if _queue_manager is None:
-        _queue_manager = SequentialQueueManager()
-    return _queue_manager
+# Global queue manager
+queue_manager = QueueManager()

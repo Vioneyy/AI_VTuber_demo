@@ -8,6 +8,13 @@ import sys
 import time
 from pathlib import Path
 
+# โหลด .env ให้เร็วที่สุดก่อน import config
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 # เพิ่ม path
 sys.path.append(str(Path(__file__).parent))
 

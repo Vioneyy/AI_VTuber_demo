@@ -17,6 +17,13 @@ env/
 # Environment variables
 .env
 
+# Large models and binaries (skip huge files; use LFS if needed)
+models/*.bin
+models/*.pth
+models/*.onnx
+models/*.pt
+models/*.ckpt
+
 # Outputs & logs
 output/
 logs/
