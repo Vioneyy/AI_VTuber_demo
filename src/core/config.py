@@ -59,17 +59,14 @@ class TTSConfig:
 class RVCConfig:
     """การตั้งค่า RVC Voice Conversion"""
     enabled: bool = os.getenv("ENABLE_RVC", "true").lower() == "true"
-    # อ่านพาธโมเดลและ index จาก ENV หากมี
-    model_path: str = os.getenv("RVC_MODEL_PATH", "rvc_models/jeed_anime.pth")
-    index_path: str = os.getenv("RVC_INDEX_PATH", "rvc_models/jeed_anime.index")
-    # พรีเซ็ตยังคงรองรับสำหรับโหมดสคาฟโฟลด์ (rvc_v2)
+    model_path: str = "rvc_models/jeed_anime.pth"
+    index_path: str = "rvc_models/jeed_anime.index"
     voice_preset: str = os.getenv("VOICE_PRESET", "anime_girl")
-    # ปรับพารามิเตอร์จาก ENV หากระบุ
-    pitch: int = int(os.getenv("RVC_PITCH", "12"))
-    filter_radius: int = int(os.getenv("RVC_FILTER_RADIUS", "3"))
-    rms_mix_rate: float = float(os.getenv("RVC_RMS_MIX_RATE", "0.8"))
-    protect: float = float(os.getenv("RVC_PROTECT", "0.33"))
-    use_gpu: bool = os.getenv("RVC_USE_GPU", "true").lower() == "true"
+    pitch: int = 12
+    filter_radius: int = 3
+    rms_mix_rate: float = 0.8
+    protect: float = 0.33
+    use_gpu: bool = True
 
 @dataclass
 class VTubeStudioConfig:

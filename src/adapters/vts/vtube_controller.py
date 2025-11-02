@@ -98,10 +98,7 @@ class VTubeStudioController:
             print("✅ เชื่อมต่อ VTube Studio")
             
             await self._authenticate()
-            # ตรวจว่าโมเดลถูกโหลดแล้วหรือยัง และพยายามโหลดตามชื่อหากระบุไว้
-            await self._ensure_model_loaded()
-            # สร้าง custom parameters ที่จำเป็นถ้ายังไม่มี
-            await self._ensure_custom_parameters()
+            await self._load_model()
             
             self.running = True
             self.animation_task = asyncio.create_task(self._animation_loop())
@@ -148,107 +145,22 @@ class VTubeStudioController:
             self.authenticated = True
             print("✅ VTS Authentication สำเร็จ")
     
-    async def _ensure_model_loaded(self):
-        """ตรวจสอบและทำให้แน่ใจว่า VTS มีโมเดลโหลดอยู่"""
-        try:
-            # เช็คโมเดลปัจจุบัน
-            current_req = {
-                "apiName": "VTubeStudioPublicAPI",
-                "apiVersion": "1.0",
-                "requestID": "current_model",
-                "messageType": "CurrentModelRequest",
-                "data": {}
-            }
-            await self.ws.send(json.dumps(current_req))
-            current_res = json.loads(await self.ws.recv())
-            if current_res.get("data", {}).get("modelLoaded"):
-                self.model_loaded = True
-                model_name = current_res.get("data", {}).get("modelName", "")
-                print(f"✅ พบโมเดลที่โหลดอยู่: {model_name}")
-                return
-
-            # ถ้าไม่มีโมเดล ให้พยายามโหลดตามชื่อใน config โดยค้นหา ID ก่อน
-            if getattr(config.vtube, "model_name", None):
-                list_req = {
-                    "apiName": "VTubeStudioPublicAPI",
-                    "apiVersion": "1.0",
-                    "requestID": "list_models",
-                    "messageType": "AvailableModelsRequest",
-                    "data": {}
-                }
-                await self.ws.send(json.dumps(list_req))
-                list_res = json.loads(await self.ws.recv())
-                models = list_res.get("data", {}).get("availableModels", [])
-                target_id = None
-                for m in models:
-                    if m.get("modelName") == config.vtube.model_name:
-                        target_id = m.get("modelID")
-                        break
-                if target_id:
-                    load_req = {
-                        "apiName": "VTubeStudioPublicAPI",
-                        "apiVersion": "1.0",
-                        "requestID": "load_model",
-                        "messageType": "ModelLoadRequest",
-                        "data": {"modelID": target_id}
-                    }
-                    await self.ws.send(json.dumps(load_req))
-                    load_res = json.loads(await self.ws.recv())
-                    if load_res.get("data", {}).get("modelLoaded"):
-                        self.model_loaded = True
-                        print(f"✅ โหลดโมเดล {config.vtube.model_name}")
-                        return
-            print("⚠️ ไม่มีโมเดลที่โหลดอยู่ใน VTS (โปรดโหลดโมเดลในแอป)")
-        except Exception as e:
-            print(f"⚠️ ตรวจสอบ/โหลดโมเดลล้มเหลว: {e}")
-
-    async def _ensure_custom_parameters(self):
-        """สร้าง custom parameters ที่ใช้โดยระบบ หากยังไม่มี"""
-        try:
-            list_req = {
-                "apiName": "VTubeStudioPublicAPI",
-                "apiVersion": "1.0",
-                "requestID": "list_custom_params",
-                "messageType": "AvailableCustomParametersRequest",
-                "data": {}
-            }
-            await self.ws.send(json.dumps(list_req))
-            list_res = json.loads(await self.ws.recv())
-            existing = {p.get("name") for p in list_res.get("data", {}).get("customParameters", [])}
-
-            needed = [
-                "AIVTuber_Mood_Happy",
-                "AIVTuber_Mood_Sad",
-                "AIVTuber_Mood_Thinking",
-                "AIVTuber_Speaking",
-                "AIVTuber_Energy",
-            ]
-
-            for name in needed:
-                if name in existing:
-                    continue
-                create_req = {
-                    "apiName": "VTubeStudioPublicAPI",
-                    "apiVersion": "1.0",
-                    "requestID": f"create_{name}",
-                    "messageType": "CreateCustomParameterRequest",
-                    "data": {
-                        "parameterName": name,
-                        "explanation": "Parameter created by AI VTuber Demo",
-                        "min": 0.0,
-                        "max": 1.0,
-                        "defaultValue": 0.0,
-                        "deleteWhenPluginDisconnects": True
-                    }
-                }
-                try:
-                    await self.ws.send(json.dumps(create_req))
-                    _ = json.loads(await self.ws.recv())
-                    print(f"🧩 สร้าง custom parameter: {name}")
-                except Exception as ce:
-                    print(f"⚠️ สร้าง custom parameter ไม่สำเร็จ ({name}): {ce}")
-        except Exception as e:
-            print(f"⚠️ ตรวจสอบ custom parameters ล้มเหลว: {e}")
+    async def _load_model(self):
+        """โหลดโมเดล"""
+        model_request = {
+            "apiName": "VTubeStudioPublicAPI",
+            "apiVersion": "1.0",
+            "requestID": "load_model",
+            "messageType": "ModelLoadRequest",
+            "data": {"modelID": config.vtube.model_name}
+        }
+        
+        await self.ws.send(json.dumps(model_request))
+        response = json.loads(await self.ws.recv())
+        
+        if response.get("data", {}).get("modelLoaded"):
+            self.model_loaded = True
+            print(f"✅ โหลดโมเดล {config.vtube.model_name}")
     
     def _generate_random_movement(self) -> MovementTarget:
         """สร้างจุดเป้าหมายแบบสุ่ม"""

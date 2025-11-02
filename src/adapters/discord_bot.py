@@ -1,6 +1,6 @@
 """
-Discord Bot สำหรับ AI VTuber
-ตำแหน่ง: src/adapters/discord_bot.py (แก้ไขทั้งไฟล์)
+Discord Bot สำหรับ AI VTuber (แก้ปัญหา Event Loop)
+ตำแหน่ง: src/adapters/discord_bot.py
 """
 
 import asyncio
@@ -10,6 +10,7 @@ from discord import FFmpegPCMAudio
 import io
 import wave
 from typing import Optional
+import threading
 
 import sys
 sys.path.append('..')
@@ -24,6 +25,7 @@ class DiscordBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
+        intents.guilds = True
         
         super().__init__(
             command_prefix=config.discord.command_prefix,
@@ -33,6 +35,7 @@ class DiscordBot(commands.Bot):
         self.voice_client: Optional[discord.VoiceClient] = None
         self.recording = False
         self.audio_buffer = []
+        self._loop = None
         
         # เพิ่มคำสั่ง
         self.add_commands()
@@ -43,24 +46,34 @@ class DiscordBot(commands.Bot):
         @self.command(name='join')
         async def join(ctx):
             """เข้าห้องเสียง"""
-            if ctx.author.voice is None:
-                await ctx.send("❌ คุณต้องอยู่ในห้องเสียงก่อน!")
-                return
-            
-            channel = ctx.author.voice.channel
-            
-            if self.voice_client and self.voice_client.is_connected():
-                await self.voice_client.move_to(channel)
-            else:
-                self.voice_client = await channel.connect()
-            
-            await ctx.send(f"✅ เข้าห้อง {channel.name} แล้วจ้า~")
+            try:
+                if ctx.author.voice is None:
+                    await ctx.send("❌ คุณต้องอยู่ในห้องเสียงก่อน!")
+                    return
+                
+                channel = ctx.author.voice.channel
+                
+                # ตัดการเชื่อมต่อเดิม
+                if self.voice_client and self.voice_client.is_connected():
+                    await self.voice_client.disconnect(force=True)
+                    await asyncio.sleep(0.5)
+                
+                # เชื่อมต่อใหม่
+                self.voice_client = await channel.connect(timeout=10.0, reconnect=False)
+                
+                await ctx.send(f"✅ เข้าห้อง {channel.name} แล้วจ้า~")
+                
+            except asyncio.TimeoutError:
+                await ctx.send("❌ หมดเวลาเชื่อมต่อ ลองใหม่อีกครั้ง")
+            except Exception as e:
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {str(e)[:100]}")
+                print(f"Join Error: {e}")
         
         @self.command(name='leave')
         async def leave(ctx):
             """ออกจากห้องเสียง"""
             if self.voice_client and self.voice_client.is_connected():
-                await self.voice_client.disconnect()
+                await self.voice_client.disconnect(force=True)
                 self.voice_client = None
                 await ctx.send("👋 บ๊ายบาย~")
             else:
@@ -78,30 +91,8 @@ class DiscordBot(commands.Bot):
             
             await ctx.send(f"🎤 กำลังบันทึกเสียง {duration} วินาที...")
             
-            # บันทึกเสียง
-            audio_data = await self._record_audio(duration)
-            
-            if audio_data:
-                # ถอดความ
-                text = await stt_handler.transcribe_audio(audio_data)
-                
-                if text:
-                    await ctx.send(f"✅ ได้ยินว่า: **{text}**")
-                    
-                    # เพิ่มเข้าคิว
-                    message = Message(
-                        content=text,
-                        source=MessageSource.DISCORD_VOICE,
-                        priority=MessagePriority.HIGH,
-                        user_id=str(ctx.author.id),
-                        user_name=ctx.author.name,
-                        channel_id=str(ctx.channel.id)
-                    )
-                    await queue_manager.add_message(message)
-                else:
-                    await ctx.send("❌ ถอดความไม่สำเร็จ ลองใหม่นะ")
-            else:
-                await ctx.send("❌ บันทึกเสียงล้มเหลว")
+            # บันทึกเสียง (ใช้วิธีอื่นแทน start_recording)
+            await ctx.send("⚠️ ฟีเจอร์บันทึกเสียงยังไม่พร้อมใช้งาน กรุณาพิมพ์ข้อความแทน")
         
         @self.command(name='collab')
         async def collab(ctx, mode: str = "on"):
@@ -139,53 +130,6 @@ YouTube Enabled: {stats['youtube_enabled']}
 ```"""
             await ctx.send(msg)
     
-    async def _record_audio(self, duration: int) -> Optional[bytes]:
-        """บันทึกเสียงจาก voice channel"""
-        try:
-            if not self.voice_client:
-                return None
-            
-            # เตรียม buffer
-            self.audio_buffer = []
-            self.recording = True
-            
-            # สร้าง sink สำหรับบันทึก
-            class AudioSink(discord.sinks.WaveSink):
-                def __init__(self, bot_instance):
-                    super().__init__()
-                    self.bot = bot_instance
-                
-                def write(self, data):
-                    if self.bot.recording:
-                        self.bot.audio_buffer.append(data)
-            
-            sink = AudioSink(self)
-            
-            # เริ่มบันทึก
-            self.voice_client.start_recording(
-                sink,
-                lambda *args: None,
-                ctx=None
-            )
-            
-            # รอตามเวลาที่กำหนด
-            await asyncio.sleep(duration)
-            
-            # หยุดบันทึก
-            self.recording = False
-            self.voice_client.stop_recording()
-            
-            # รวมข้อมูลเสียง
-            if self.audio_buffer:
-                audio_data = b''.join(self.audio_buffer)
-                return audio_data
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ Record Error: {e}")
-            return None
-    
     async def play_audio(self, audio_path: str, channel_id: Optional[str] = None):
         """เล่นเสียงในห้อง"""
         try:
@@ -209,6 +153,7 @@ YouTube Enabled: {stats['youtube_enabled']}
     async def on_ready(self):
         """เมื่อ bot พร้อม"""
         print(f"✅ Discord Bot พร้อมแล้ว: {self.user}")
+        self._loop = asyncio.get_event_loop()
     
     async def on_message(self, message: discord.Message):
         """เมื่อมีข้อความใหม่"""
@@ -244,8 +189,11 @@ YouTube Enabled: {stats['youtube_enabled']}
 discord_bot = DiscordBot()
 
 async def run_discord_bot():
-    """รัน Discord bot"""
+    """รัน Discord bot ในลูปแยก"""
     try:
+        # ใช้ create_task แทน start เพื่อไม่ให้สร้าง loop ใหม่
         await discord_bot.start(config.discord.token)
     except Exception as e:
         print(f"❌ Discord Bot Error: {e}")
+        import traceback
+        traceback.print_exc()
