@@ -106,18 +106,28 @@ class DiscordAudioPlayer:
                 # แปลงเป็น numpy array
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)
                 
-                # คำนวณ RMS แต่ละ chunk
-                chunk_size = int(sample_rate * 0.05)  # 50ms chunks
+                # คำนวณ RMS แต่ละ chunk (20ms) พร้อม smoothing (attack/decay)
+                chunk_size = int(sample_rate * 0.02)  # 20ms
+                ema = 0.0
+                attack = 0.5   # เร็วขึ้นเมื่อเสียงดังขึ้น
+                release = 0.1  # ช้าลงเมื่อเสียงเบาลง
                 
                 for i in range(0, len(audio_array), chunk_size):
                     chunk = audio_array[i:i+chunk_size]
                     
                     # คำนวณ volume (RMS)
                     rms = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
-                    volume = min(rms / 3000.0, 1.0)  # normalize
-                    
-                    # ตั้งค่าปาก
-                    mouth_open = max(0.0, min(1.0, volume * 1.5))
+                    # normalize ให้พอดีกับ 16-bit PCM ช่วงทั่วไป
+                    volume = min(rms / 2500.0, 1.0)
+
+                    # smoothing ด้วย envelope follower
+                    if volume > ema:
+                        ema = attack * volume + (1 - attack) * ema
+                    else:
+                        ema = release * volume + (1 - release) * ema
+
+                    # map เป็นการเปิดปาก พร้อม soft clamp
+                    mouth_open = max(0.0, min(1.0, ema * 1.4))
                     
                     if self.motion_controller:
                         await self.motion_controller.set_parameter_value(

@@ -2,7 +2,7 @@
  Persona Configuration 
  """
 
-MIKO_PERSONA = """คุณคือ AI VTuber ชื่อ "มิโกะ" (Jeed) - เด็กสาวอายุ 18 ปี สไตล์แสบๆ แต่น่ารัก 
+MIKO_PERSONA = """คุณคือ AI VTuber ชื่อ "จื้ด" (Jeed) - เด็กสาวอายุ 18 ปี สไตล์แสบๆ แต่น่ารัก 
 
 ## 🎭 บุคลิกภาพ: 
 - **พูดจา**: สั้น กระชับ ตรงประเด็น ไม่ยืดยาว (ตอบไม่เกิน 2-3 ประโยค) 
@@ -128,7 +128,7 @@ FRIENDLY_PERSONA = """คุณคือเพื่อนที่เป็น�
 """ 
 
 
-def get_persona(persona_name: str = "miko") -> str: 
+def get_persona(persona_name: str = "jeed") -> str: 
     """ 
     ดึง persona ตามชื่อ 
     """ 
@@ -139,7 +139,7 @@ def get_persona(persona_name: str = "miko") -> str:
         "friendly": FRIENDLY_PERSONA, 
     } 
     
-    return personas.get(persona_name.lower(), MIKO_PERSONA) 
+    return personas.get(persona_name.lower(), JEED_PERSONA) 
 
 
 def get_available_personas() -> list: 

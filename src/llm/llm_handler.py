@@ -21,7 +21,7 @@ class LLMHandler:
     def __init__(self):
         self.client = AsyncOpenAI(api_key=config.llm.api_key)
         self.conversation_history: List[Dict] = []
-        self.max_history = 10  # เก็บประวัติ 10 ข้อความล่าสุด
+        self.max_history = 6  # เก็บประวัติสั้นลงเพื่อลดโทเค็น
         
         # Statistics
         self.total_requests = 0
@@ -50,17 +50,25 @@ class LLMHandler:
             if len(self.conversation_history) > self.max_history * 2:
                 self.conversation_history = self.conversation_history[-self.max_history * 2:]
             
-            # สร้าง messages
+            # สร้าง messages (จำกัดประวัติให้สั้นลง)
+            hist = self.conversation_history[-self.max_history:]
             messages = [
                 {"role": "system", "content": JeedPersona.SYSTEM_PROMPT}
-            ] + self.conversation_history
+            ] + hist
+
+            # กำหนด max_tokens แบบไดนามิกตามความยาวคำถาม
+            approx_len = len(user_message)
+            dynamic_max = min(
+                config.llm.max_tokens,
+                max(40, min(80, 20 + approx_len // 4))
+            )
             
             # เรียก API
             response = await asyncio.wait_for(
                 self.client.chat.completions.create(
                     model=config.llm.model,
                     messages=messages,
-                    max_tokens=config.llm.max_tokens,
+                    max_tokens=dynamic_max,
                     temperature=config.llm.temperature,
                     presence_penalty=config.llm.presence_penalty,
                     frequency_penalty=config.llm.frequency_penalty

@@ -8,6 +8,48 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Wrapper ให้ main.py import F5TTSThai ได้ และเมธอด generate() คืน WAV bytes
+from .f5_tts_thai_real import F5TTSThai as _RealF5TTSThai
+import io
+import wave
+import numpy as np
+
+class F5TTSThai:
+    def __init__(self, device: str | None = None, reference_wav: str | None = None):
+        # device ไม่ได้ใช้โดยตรงใน engine จริง แต่รับไว้เพื่อความเข้ากันได้
+        try:
+            self.engine = _RealF5TTSThai()
+        except Exception as e:
+            logger.error(f"❌ โหลด F5-TTS-Thai ไม่สำเร็จ: {e}. ใช้ fallback แบบเงียบแทน")
+            self.engine = self._fallback_engine()
+        if reference_wav:
+            # ตั้งพาธไฟล์อ้างอิงให้ engine
+            try:
+                self.engine.ref_audio_path = reference_wav
+            except Exception:
+                pass
+
+    async def generate(self, text: str) -> bytes:
+        return self.engine.synthesize(text)
+
+    def _fallback_engine(self):
+        class _SilentEngine:
+            def __init__(self, sr: int = 24000):
+                self.sample_rate = sr
+
+            def synthesize(self, text: str) -> bytes:
+                duration = 1.0
+                data = np.zeros(int(self.sample_rate * duration), dtype=np.float32)
+                buf = io.BytesIO()
+                with wave.open(buf, 'wb') as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(self.sample_rate)
+                    pcm16 = (data * 32767.0).astype(np.int16)
+                    w.writeframes(pcm16.tobytes())
+                return buf.getvalue()
+        return _SilentEngine()
+
 class F5ThaiAdapter:
     """Adapter ให้อินเทอร์เฟซแบบ generate(text) คืนพาธไฟล์ WAV
     ใช้ F5TTSThai.synthesize() ภายใน
@@ -38,9 +80,8 @@ def create_tts_engine(engine_type: str | None = None):
         raise RuntimeError("Unsupported TTS_ENGINE. Set TTS_ENGINE=f5_tts_thai")
 
     try:
-        from .f5_tts_thai_real import F5TTSThai
         logger.info("✅ ใช้ F5-TTS-Thai")
-        return F5ThaiAdapter(F5TTSThai())
+        return F5TTSThai()
     except ImportError as e:
         logger.error(f"❌ ไม่สามารถโหลด F5-TTS-Thai: {e}")
         logger.error("ติดตั้งด้วย: pip install f5-tts-th")

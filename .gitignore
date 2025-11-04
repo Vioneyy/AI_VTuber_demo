@@ -15,7 +15,8 @@ env/
 .idea/
 
 # Environment variables
-.env
+# Note: allow committing .env per user request
+!.env
 
 # Large models and binaries (skip huge files; use LFS if needed)
 models/*.bin

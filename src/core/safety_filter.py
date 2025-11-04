@@ -1,20 +1,20 @@
 """
-ระบบกรองเนื้อหาที่ไม่เหมาะสม
-ตำแหน่ง: src/core/safety_filter.py (สร้างใหม่)
-แทนที่: src/core/policy.py (ลบไฟล์เก่า)
+ระบบกรองเนื้อหาที่ไม่เหมาะสม + ระบบอนุมัติ
+ตำแหน่ง: src/core/safety_filter.py
+ให้สอดคล้องกับ ResponseGenerator และ AdminCommands
 """
 
 import re
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 from enum import Enum
 
 from core.config import config
 
-class FilterResult(Enum):
-    """ผลการกรอง"""
-    ALLOW = "allow"              # อนุญาต
-    BLOCK = "block"              # บล็อก
-    REQUIRE_PERMISSION = "require_permission"  # ต้องขออนุญาต
+class SafetyLevel(Enum):
+    """ระดับความปลอดภัยที่ใช้โดย ResponseGenerator"""
+    ALLOW = "allow"
+    BLOCKED = "blocked"
+    NEEDS_APPROVAL = "needs_approval"
 
 class SafetyFilter:
     """กรองเนื้อหาที่ไม่เหมาะสม"""
@@ -52,9 +52,11 @@ class SafetyFilter:
     def __init__(self):
         self.forbidden_topics = config.safety.forbidden_topics
         self.restricted_topics = config.safety.restricted_topics
-        self.permission_pending = {}  # {message_id: content}
+        # ระบบอนุมัติ
+        self._pending_approvals: Dict[str, Dict] = {}
+        self._approved: Dict[str, bool] = {}
         
-    def check_content(self, text: str) -> Tuple[FilterResult, Optional[str]]:
+    def check_content(self, text: str) -> Tuple[SafetyLevel, Optional[str]]:
         """
         ตรวจสอบเนื้อหา
         Returns: (ผลการกรอง, เหตุผล)
@@ -64,31 +66,31 @@ class SafetyFilter:
         # 1. Check profanity
         for word in self.PROFANITY_WORDS:
             if word in text_lower:
-                return FilterResult.BLOCK, f"พบคำหยาบ: {word}"
+                return SafetyLevel.BLOCKED, f"พบคำหยาบ: {word}"
         
         # 2. Check forbidden topics
         if self._contains_keywords(text_lower, self.POLITICAL_KEYWORDS, threshold=2):
-            return FilterResult.BLOCK, "เนื้อหาเกี่ยวกับการเมือง"
+            return SafetyLevel.BLOCKED, "เนื้อหาเกี่ยวกับการเมือง"
         
         if self._contains_keywords(text_lower, self.RELIGIOUS_KEYWORDS, threshold=2):
             if self._is_extreme_religious(text_lower):
-                return FilterResult.BLOCK, "เนื้อหาศาสนาสุดโต่ง"
+                return SafetyLevel.BLOCKED, "เนื้อหาศาสนาสุดโต่ง"
         
         if self._contains_keywords(text_lower, self.VIOLENCE_KEYWORDS, threshold=2):
-            return FilterResult.BLOCK, "เนื้อหาความรุนแรง"
+            return SafetyLevel.BLOCKED, "เนื้อหาความรุนแรง"
         
         # 3. Check restricted topics (require permission)
         if self._contains_keywords(text_lower, self.SYSTEM_KEYWORDS, threshold=1):
-            return FilterResult.REQUIRE_PERMISSION, "ข้อมูลเกี่ยวกับระบบ"
+            return SafetyLevel.NEEDS_APPROVAL, "ข้อมูลเกี่ยวกับระบบ"
         
         # 4. Additional checks
         if self._contains_personal_info(text):
-            return FilterResult.BLOCK, "ข้อมูลส่วนตัว"
+            return SafetyLevel.BLOCKED, "ข้อมูลส่วนตัว"
         
         if self._is_spam(text):
-            return FilterResult.BLOCK, "ข้อความสแปม"
+            return SafetyLevel.BLOCKED, "ข้อความสแปม"
         
-        return FilterResult.ALLOW, None
+        return SafetyLevel.ALLOW, None
     
     def _contains_keywords(self, text: str, keywords: List[str], threshold: int = 1) -> bool:
         """ตรวจสอบว่ามีคำที่กำหนดหรือไม่"""
@@ -137,34 +139,54 @@ class SafetyFilter:
         
         return False
     
-    def create_safe_response(self, filter_result: FilterResult, reason: str) -> str:
+    def generate_rejection_message(self, reason: str, personality: Optional[str] = None) -> str:
         """สร้างคำตอบที่ปลอดภัย"""
-        if filter_result == FilterResult.BLOCK:
-            responses = [
+        responses = [
                 "เอ๊ะ หนูคิดว่าเราไม่ควรคุยเรื่องนี้นะ ลองถามเรื่องอื่นดีกว่า~",
                 "อุ๊ปส์ เรื่องนี้หนูตอบไม่ได้นะ ขอโทษจ้า 😅",
                 "หนูไม่สามารถพูดเรื่องนี้ได้ค่ะ ลองถามเรื่องอื่นไหม~",
             ]
-            import random
-            return random.choice(responses)
-        
-        elif filter_result == FilterResult.REQUIRE_PERMISSION:
-            return "หนูต้องขออนุญาตผู้ควบคุมก่อนนะ รอแป๊บนึง~"
-        
-        return ""
+        import random
+        return random.choice(responses)
     
-    async def request_permission(self, content: str, message_id: str) -> bool:
-        """
-        ขออนุญาตจากผู้ควบคุม
-        TODO: ต้องเชื่อมกับระบบ Discord/Console
-        """
-        self.permission_pending[message_id] = content
-        print(f"\n🔐 ขออนุญาต: {content[:100]}")
-        print("พิมพ์ 'approve' เพื่ออนุญาต หรือ 'deny' เพื่อปฏิเสธ")
-        
-        # ในเวอร์ชันจริงควรรอการตอบกลับ
-        # ตอนนี้ return False ไว้ก่อน
+    async def request_approval(self, content: str, user: str, source: str) -> str:
+        """สร้างคำขออนุมัติและคืน approval_id"""
+        import time, uuid
+        approval_id = uuid.uuid4().hex[:8]
+        self._pending_approvals[approval_id] = {
+            "content": content,
+            "user": user,
+            "source": source,
+            "created_at": time.time(),
+        }
+        print(f"\n🔐 ขออนุมัติ ({approval_id}): {content[:80]} จาก {source}")
+        return approval_id
+
+    async def wait_for_approval(self, approval_id: str, timeout: float = 10.0) -> bool:
+        """รอผลอนุมัติภายในเวลาที่กำหนด"""
+        start = __import__('time').time()
+        while __import__('time').time() - start < timeout:
+            if approval_id in self._approved:
+                return self._approved.pop(approval_id)
+            await __import__('asyncio').sleep(0.2)
+        # timeout: ปฏิเสธโดยอัตโนมัติ
+        self._pending_approvals.pop(approval_id, None)
         return False
+
+    def approve_request(self, approval_id: str, approved: bool) -> bool:
+        """ให้แอดมินอนุมัติ/ปฏิเสธคำขอ"""
+        if approval_id in self._pending_approvals:
+            self._approved[approval_id] = approved
+            self._pending_approvals.pop(approval_id, None)
+            return True
+        return False
+
+    def get_pending_approvals(self) -> List[Dict]:
+        return [
+            {"id": k, **v} for k, v in sorted(
+                self._pending_approvals.items(), key=lambda kv: kv[1]["created_at"], reverse=True
+            )
+        ]
     
     def approve_permission(self, message_id: str) -> bool:
         """อนุญาตข้อความ"""
@@ -193,4 +215,10 @@ class SafetyFilter:
         return text.strip()
 
 # Global safety filter
-safety_filter = SafetyFilter()
+_safety_filter: Optional[SafetyFilter] = None
+
+def get_safety_filter() -> SafetyFilter:
+    global _safety_filter
+    if _safety_filter is None:
+        _safety_filter = SafetyFilter()
+    return _safety_filter

@@ -7,10 +7,19 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Base directory
 BASE_DIR = Path(__file__).parent.parent.parent
 SRC_DIR = BASE_DIR / "src"
+
+# Load .env explicitly from project root
+ENV_PATH = BASE_DIR / ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=str(ENV_PATH), override=False)
+else:
+    # Try loading from current working directory as fallback
+    load_dotenv()
 
 @dataclass
 class STTConfig:
@@ -34,11 +43,11 @@ class LLMConfig:
     """การตั้งค่า Language Model"""
     model: str = os.getenv("LLM_MODEL", "gpt-4-turbo")
     api_key: str = os.getenv("OPENAI_API_KEY", "")
-    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "80"))
-    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.85"))
-    presence_penalty: float = 0.3
-    frequency_penalty: float = 0.3
-    timeout: int = int(os.getenv("RESPONSE_TIMEOUT", "8"))
+    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "60"))
+    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    presence_penalty: float = 0.2
+    frequency_penalty: float = 0.2
+    timeout: int = int(os.getenv("RESPONSE_TIMEOUT", "6"))
     
 @dataclass
 class TTSConfig:
@@ -165,6 +174,9 @@ class Config:
         
         # Create necessary directories
         self._create_directories()
+
+        # Auto-fix known paths if missing
+        self._apply_path_fallbacks()
         
     def _create_directories(self):
         """สร้างโฟลเดอร์ที่จำเป็น"""
@@ -176,6 +188,21 @@ class Config:
         ]
         for dir_path in dirs:
             Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+    def _apply_path_fallbacks(self):
+        """ปรับพาธที่พบบ่อยให้ถูกต้องอัตโนมัติ (เช่น Whisper.cpp)"""
+        # Whisper.cpp fallback
+        whisper_path = Path(self.stt.whisper_bin_path)
+        if not whisper_path.exists():
+            # Common installation path suggested by user
+            alt_path = Path("D:/whisper.cpp-master/main.exe")
+            alt_path_win = Path("D:\\whisper.cpp-master\\main.exe")
+            if alt_path.exists():
+                self.stt.whisper_bin_path = str(alt_path)
+                print(f"🔧 ใช้ Whisper.cpp จาก: {self.stt.whisper_bin_path}")
+            elif alt_path_win.exists():
+                self.stt.whisper_bin_path = str(alt_path_win)
+                print(f"🔧 ใช้ Whisper.cpp จาก: {self.stt.whisper_bin_path}")
         
     def validate(self) -> bool:
         """ตรวจสอบการตั้งค่า"""
@@ -221,6 +248,88 @@ class Config:
         print("\n" + "="*50)
         print("🎮 Jeed AI VTuber Configuration")
         print("="*50)
+
+    # ===== Compatibility aliases (uppercase names expected by main.py) =====
+    @property
+    def LLM_MODEL(self) -> str:
+        return self.llm.model
+
+    @property
+    def OPENAI_API_KEY(self) -> str:
+        return self.llm.api_key
+
+    @property
+    def LLM_MAX_TOKENS(self) -> int:
+        return self.llm.max_tokens
+
+    @property
+    def LLM_TEMPERATURE(self) -> float:
+        return self.llm.temperature
+
+    @property
+    def RESPONSE_TIMEOUT(self) -> int:
+        return self.llm.timeout
+
+    @property
+    def TTS_ENGINE(self) -> str:
+        return self.tts.engine
+
+    @property
+    def TTS_REFERENCE_WAV(self) -> str:
+        return self.tts.reference_wav
+
+    @property
+    def ENABLE_RVC(self) -> bool:
+        return self.rvc.enabled
+
+    @property
+    def RVC_MODEL_PATH(self) -> str:
+        return self.rvc.model_path
+
+    @property
+    def VTS_PLUGIN_NAME(self) -> str:
+        return self.vtube.plugin_name
+
+    @property
+    def VTS_MODEL_NAME(self) -> str:
+        return self.vtube.model_name
+
+    @property
+    def DISCORD_BOT_TOKEN(self) -> str:
+        return self.discord.token
+
+    @property
+    def DISCORD_VOICE_STT_ENABLED(self) -> bool:
+        return self.discord.stt_enabled
+
+    @property
+    def YOUTUBE_STREAM_ID(self) -> str:
+        return self.youtube.stream_id
+
+    @property
+    def AUDIO_DEVICE(self) -> str:
+        # Simple mapping: use_gpu → 'cuda', else 'cpu'
+        return 'cuda' if self.system.use_gpu else 'cpu'
+
+    @property
+    def WHISPER_CPP_BIN_PATH(self) -> str:
+        return self.stt.whisper_bin_path
+
+    @property
+    def WHISPER_CPP_MODEL_PATH(self) -> str:
+        return self.stt.whisper_model_path
+
+    @property
+    def WHISPER_CPP_LANG(self) -> str:
+        return self.stt.language
+
+    @property
+    def WHISPER_CPP_THREADS(self) -> int:
+        return self.stt.threads
+
+    @property
+    def WHISPER_CPP_NGL(self) -> int:
+        return self.stt.n_gpu_layers
         print(f"LLM Model: {self.llm.model}")
         print(f"TTS Engine: {self.tts.engine}")
         print(f"RVC Enabled: {self.rvc.enabled}")

@@ -96,3 +96,16 @@ def convert(audio_wav_bytes: bytes, preset: str) -> Optional[bytes]:
     data, sr, _sampwidth = _read_wav_bytes(audio_wav_bytes)
     data2, sr2 = _pitch_shift_resample(data, sr, cfg["pitch_semitones"], cfg["speed"])
     return _write_wav_bytes(data2.astype(np.float32), sr2, 2)
+
+
+class RVCProcessor:
+    """Wrapper ให้ main.py ใช้งานชื่อคลาส RVCProcessor ได้
+    convert(audio_bytes) -> bytes โดยใช้พรีเซ็ตจาก config หรือ 'neutral'
+    """
+    def __init__(self, model_path: Optional[str] = None, device: Optional[str] = None, preset: str = "neutral"):
+        self.model_path = model_path
+        self.device = device
+        self.preset = preset
+
+    async def convert(self, audio_wav_bytes: bytes) -> Optional[bytes]:
+        return convert(audio_wav_bytes, self.preset)

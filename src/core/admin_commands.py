@@ -36,6 +36,11 @@ class AdminCommandHandler:
             "skip": self.cmd_skip,
             "unlock": self.cmd_unlock,
             "lock": self.cmd_lock,
+            # เพิ่มคำสั่งควบคุมการรับคิวจาก youtube/voice
+            "yt_on": self.cmd_youtube_on,
+            "yt_off": self.cmd_youtube_off,
+            "voice_on": self.cmd_voice_on,
+            "voice_off": self.cmd_voice_off,
         }
         
         # Secret unlock code
@@ -136,36 +141,64 @@ class AdminCommandHandler:
         status_lines = ["📊 **สถานะระบบ**"]
         
         if queue_manager:
-            status = queue_manager.get_status()
+            status = queue_manager.get_stats()
             status_lines.extend([
                 f"- คิว: {status['queue_size']} ข้อความ",
-                f"- กำลังประมวลผล: {'✅' if status['is_processing'] else '❌'}",
+                f"- กำลังประมวลผล: {'✅' if status['processing'] else '❌'}",
                 f"- ประมวลผลแล้ว: {status['total_processed']} ข้อความ",
-                f"- Errors: {status['total_errors']}"
+                f"- ทิ้งไป: {status['total_dropped']}"
             ])
         
         if safety_filter:
             pending = safety_filter.get_pending_approvals()
             status_lines.append(f"- รออนุมัติ: {len(pending)} รายการ")
-        
+
         return "\n".join(status_lines)
-    
+
     async def cmd_queue(self, args: List[str], user_id: str, context: dict) -> str:
-        """ดูคิวข้อความ"""
+        """ดู/จัดการคิว: !queue [clear]"""
         queue_manager = context.get("queue_manager")
-        
-        if not queue_manager:
-            return "❌ Queue manager ไม่พร้อม"
-        
-        status = queue_manager.get_status()
-        
-        lines = [
-            "📋 **คิวข้อความ**",
-            f"- จำนวน: {status['queue_size']}",
-            f"- กำลังประมวลผล: {status.get('current_message', 'ไม่มี')}"
-        ]
-        
-        return "\n".join(lines)
+        scheduler = context.get("scheduler")
+        if not queue_manager and not scheduler:
+            return "❌ ไม่พบระบบคิว"
+
+        action = args[0].lower() if args else None
+        if action == "clear":
+            # ล้างคิวของระบบที่มีอยู่
+            cleared = 0
+            try:
+                if queue_manager:
+                    queue_manager.clear_queue()
+                    # ไม่ทราบจำนวนที่ล้างได้จาก PriorityQueue ง่าย ๆ
+                    return "🧹 ล้างคิว QueueManager แล้ว"
+                q = getattr(scheduler, 'queue', None)
+                while q and not q.empty():
+                    q.get_nowait()
+                    cleared += 1
+            except Exception:
+                pass
+            return f"🧹 ล้างคิว Scheduler แล้ว: {cleared} รายการ"
+
+        # แสดงสถานะคิว
+        if queue_manager:
+            status = queue_manager.get_stats()
+            return (
+                "📋 **คิวข้อความ**\n"
+                f"- จำนวน: {status['queue_size']}\n"
+                f"- กำลังประมวลผล: {'✅' if status['processing'] else '❌'}\n"
+                f"- YouTube: {'✅' if status['youtube_enabled'] else '❌'}\n"
+                f"- โหมดคอแลป: {'✅' if status['collab_mode'] else '❌'}"
+            )
+        else:
+            # Fallback to scheduler info
+            try:
+                q = getattr(scheduler, 'queue', None)
+                size = q.qsize() if q else 0
+            except Exception:
+                size = 0
+            return f"📬 ขนาดคิว: {size} รายการ (ใช้ !queue clear เพื่อล้าง)"
+    
+    # ลบเมธอดซ้ำ cmd_queue เดิม (รวมเข้าด้านบนแล้ว)
     
     async def cmd_skip(self, args: List[str], user_id: str, context: dict) -> str:
         """ข้ามข้อความปัจจุบัน"""
@@ -194,10 +227,39 @@ class AdminCommandHandler:
         
         self.is_unlocked = False
         return "🔒 ล็อคแล้ว! ห้ามพูดถึงโปรเจค"
-    
+
     def can_reveal_project_info(self) -> bool:
         """เช็คว่าสามารถเปิดเผยข้อมูลโปรเจคได้หรือไม่"""
         return self.is_unlocked
+
+    # ===== Queue control commands =====
+    async def cmd_youtube_on(self, args: List[str], user_id: str, context: dict) -> str:
+        qm = context.get("queue_manager")
+        if hasattr(qm, 'set_youtube_enabled'):
+            qm.set_youtube_enabled(True)
+            return "📺 เปิดรับคอมเม้น YouTube แล้ว"
+        return "⚠️ ระบบคิวไม่รองรับการตั้งค่า YouTube"
+
+    async def cmd_youtube_off(self, args: List[str], user_id: str, context: dict) -> str:
+        qm = context.get("queue_manager")
+        if hasattr(qm, 'set_youtube_enabled'):
+            qm.set_youtube_enabled(False)
+            return "📺 ปิดรับคอมเม้น YouTube แล้ว"
+        return "⚠️ ระบบคิวไม่รองรับการตั้งค่า YouTube"
+
+    async def cmd_voice_on(self, args: List[str], user_id: str, context: dict) -> str:
+        qm = context.get("queue_manager")
+        if hasattr(qm, 'set_collab_mode'):
+            qm.set_collab_mode(True)
+            return "🎤 เปิดโหมดรับเสียง (collab) แล้ว"
+        return "⚠️ ระบบคิวไม่รองรับการตั้งค่า Voice"
+
+    async def cmd_voice_off(self, args: List[str], user_id: str, context: dict) -> str:
+        qm = context.get("queue_manager")
+        if hasattr(qm, 'set_collab_mode'):
+            qm.set_collab_mode(False)
+            return "🎤 ปิดโหมดรับเสียง (collab) แล้ว"
+        return "⚠️ ระบบคิวไม่รองรับการตั้งค่า Voice"
 
 
 # Singleton
