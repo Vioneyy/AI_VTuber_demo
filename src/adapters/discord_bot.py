@@ -643,6 +643,12 @@ class VoiceRecorderSink(voice_sinks.BasicSink):
         # สร้าง callback สำหรับ BasicSink ที่รับ (user, VoiceData)
         self.callback = callback
         self.audio_data = {}
+        # เกณฑ์ตัดความเงียบแบบง่ายด้วย RMS ของสัญญาณ (int16)
+        try:
+            import os as _os
+            self._rms_thresh = int(_os.getenv("DISCORD_VOICE_RMS_THRESHOLD", "350"))
+        except Exception:
+            self._rms_thresh = 350
         super().__init__(event=self._on_voice_data)
 
     def _on_voice_data(self, user, data):
@@ -663,6 +669,27 @@ class VoiceRecorderSink(voice_sinks.BasicSink):
         if len(self.audio_data[user]) >= 96000:
             audio_bytes = bytes(self.audio_data[user])
             self.audio_data[user].clear()
+            # กรองความเงียบ/เสียงรบกวน: คำนวณ RMS ในโดเมน int16
+            try:
+                import numpy as _np
+                if len(audio_bytes) % 2 == 0 and len(audio_bytes) > 0:
+                    pcm = _np.frombuffer(audio_bytes, dtype=_np.int16)
+                    # หลีกเลี่ยง overflow ด้วยการ cast เป็น float32
+                    rms = float(_np.sqrt(_np.mean((_np.asarray(pcm, dtype=_np.float32))**2)))
+                else:
+                    rms = 0.0
+            except Exception:
+                rms = 0.0
+
+            # ถ้า RMS ต่ำกว่าเกณฑ์ ให้ข้ามเพื่อไม่ให้เรียก STT โดยเปลืองทรัพยากร
+            if rms < self._rms_thresh:
+                try:
+                    import logging as _logging
+                    _logging.getLogger(__name__).debug(f"🔇 Skipping silent chunk (RMS={rms:.1f} < {self._rms_thresh})")
+                except Exception:
+                    pass
+                return
+
             # ส่งไปประมวลผล (ส่งผู้ใช้และบล็อกเสียง 1s)
             self.callback(user, audio_bytes)
 

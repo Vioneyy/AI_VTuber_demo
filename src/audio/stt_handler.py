@@ -26,12 +26,23 @@ class STTHandler:
         self.total_processed = 0
         self._py_whisper_model = None
         self._py_whisper_model_name = os.getenv("PY_WHISPER_MODEL", "medium")
+        # ปิด fp16 เป็นดีฟอลต์เพื่อหลีกเลี่ยง error บน GPU/ไดรเวอร์บางรุ่น
+        self._py_whisper_fp16 = (os.getenv("PY_WHISPER_FP16", "false").lower() in ("1", "true", "yes"))
+        self._py_whisper_fallback_warned = False
         
         # ตรวจสอบไฟล์
         if not self.whisper_bin.exists():
             print(f"⚠️ ไม่พบ Whisper.cpp: {self.whisper_bin}")
         if not self.model_path.exists():
             print(f"⚠️ ไม่พบโมเดล: {self.model_path}")
+
+        # หากไม่มี whisper.cpp ให้เตรียมโหลดโมเดล Python Whisper เพียงครั้งเดียวล่วงหน้า
+        try:
+            if not self.whisper_bin.exists():
+                self._preload_python_whisper()
+        except Exception as e:
+            # ไม่ให้ล้มเหลวทั้งระบบเพราะ fallback โหลดไม่ได้ในตอนเริ่มต้น
+            print(f"⚠️ ไม่สามารถ preload Python Whisper: {e}")
     
     async def transcribe_audio(self, audio_data: bytes, sample_rate: int = 16000) -> Optional[str]:
         """
@@ -57,7 +68,9 @@ class STTHandler:
                     print("🔁 Whisper.cpp ไม่ได้ผล ลองใช้ Python Whisper แทน")
                     text = await self._run_python_whisper(tmp_path)
             else:
-                print("🔁 ใช้ Python Whisper fallback (ไม่พบ Whisper.cpp)")
+                if not self._py_whisper_fallback_warned:
+                    print("🔁 ใช้ Python Whisper fallback (ไม่พบ Whisper.cpp)")
+                    self._py_whisper_fallback_warned = True
                 text = await self._run_python_whisper(tmp_path)
             
             # ลบไฟล์ชั่วคราว
@@ -142,14 +155,48 @@ class STTHandler:
                 except Exception:
                     use_gpu = False
                 device = "cuda" if use_gpu else "cpu"
-                # แคชโมเดลไว้ใช้งานซ้ำเพื่อความเร็ว
+                # แคชโมเดลไว้ใช้งานซ้ำเพื่อความเร็ว (โหลดครั้งเดียว)
                 if self._py_whisper_model is None:
+                    # หากยังไม่ถูก preload ให้โหลดที่นี่ (ครั้งเดียว)
                     print(f"⬇️ กำลังโหลดโมเดล Python Whisper: {self._py_whisper_model_name} ({device})")
                     self._py_whisper_model = whisper.load_model(self._py_whisper_model_name, device=device)
 
-                # ตั้งค่า fp16 เมื่อใช้ GPU เพื่อความเร็ว
-                fp16 = use_gpu
-                result = self._py_whisper_model.transcribe(audio_path, language=config.stt.language, fp16=fp16)
+                # ใช้ fp16 ตาม ENV เท่านั้น (ดีฟอลต์ False เพื่อความเสถียร)
+                fp16 = bool(self._py_whisper_fp16 and use_gpu)
+                try:
+                    result = self._py_whisper_model.transcribe(
+                        audio_path,
+                        language=config.stt.language,
+                        fp16=fp16,
+                    )
+                except Exception as e:
+                    # แก้เคส GPU shape mismatch โดย retry แบบ fp16=False และ/หรือย้ายไป CPU
+                    err_msg = str(e)
+                    print(f"⚠️ Python Whisper Error (initial): {err_msg}")
+                    try:
+                        # Retry ครั้งที่ 1: บังคับ fp16=False บนอุปกรณ์เดิม
+                        result = self._py_whisper_model.transcribe(
+                            audio_path,
+                            language=config.stt.language,
+                            fp16=False,
+                        )
+                    except Exception as e2:
+                        print(f"⚠️ Retry fp32 บน {device} ล้มเหลว: {e2}")
+                        # Retry ครั้งที่ 2: สุดท้ายย้ายไป CPU ถ้ายังใช้ GPU อยู่
+                        try:
+                            if use_gpu:
+                                cpu_model = whisper.load_model(self._py_whisper_model_name, device="cpu")
+                                result = cpu_model.transcribe(
+                                    audio_path,
+                                    language=config.stt.language,
+                                    fp16=False,
+                                )
+                            else:
+                                raise e2
+                        except Exception as e3:
+                            print(f"❌ Python Whisper Error (retries failed): {e3}")
+                            return None
+
                 text = (result.get("text") or "").strip()
                 return text if text else None
             except Exception as e:
@@ -161,8 +208,21 @@ class STTHandler:
     
     def _save_wav(self, path: str, audio_data: bytes, sample_rate: int):
         """บันทึกไฟล์ WAV"""
-        # แปลง bytes เป็น numpy array
+        # จัดระเบียบบัฟเฟอร์: ถ้าไม่เป็นจำนวนคู่ของไบต์ ให้แพด 0 เพื่อหลีกเลี่ยง wave error
+        if len(audio_data) % 2 != 0:
+            audio_data = audio_data + b"\x00"
+        # แปลง bytes เป็น numpy array (mono 16-bit)
         audio_np = np.frombuffer(audio_data, dtype=np.int16)
+        # ตัวเลือก: downsample เป็น 16k เพื่อช่วยลดภาระ ffmpeg/whisper (ถ้ามี scipy)
+        try:
+            if sample_rate != 16000:
+                from scipy.signal import resample_poly
+                # ใช้ polyphase resampling เพื่อคุณภาพและประสิทธิภาพ
+                audio_np = resample_poly(audio_np.astype(np.float32), 1, int(sample_rate/16000)).astype(np.int16)
+                sample_rate = 16000
+        except Exception:
+            # ถ้าไม่มี scipy ให้คง sample_rate เดิมไว้ ซอฟต์แวร์จะ resample เอง
+            pass
         
         # บันทึกเป็น WAV
         with wave.open(path, 'wb') as wav_file:
@@ -192,6 +252,26 @@ class STTHandler:
         return {
             "total_processed": self.total_processed
         }
+
+    # ภายใน: โหลดโมเดล Python Whisper ล่วงหน้า (ครั้งเดียว)
+    def _preload_python_whisper(self):
+        try:
+            whisper = importlib.import_module("whisper")
+        except Exception:
+            print("❌ ไม่พบไลบรารี Python Whisper (openai-whisper). ติดตั้งด้วย: pip install -U openai-whisper")
+            return
+
+        # ตรวจสอบ GPU แบบไดนามิก
+        try:
+            import torch
+            use_gpu = torch.cuda.is_available()
+        except Exception:
+            use_gpu = False
+        device = "cuda" if use_gpu else "cpu"
+
+        if self._py_whisper_model is None:
+            print(f"⬇️ กำลังโหลดโมเดล Python Whisper: {self._py_whisper_model_name} ({device})")
+            self._py_whisper_model = whisper.load_model(self._py_whisper_model_name, device=device)
 
 # Global STT handler
 stt_handler = STTHandler()

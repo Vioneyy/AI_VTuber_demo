@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import Config
 from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
+from audio.stt_handler import stt_handler  # โหลดครั้งเดียวเพื่อคงโมเดลไว้ในหน่วยความจำ
 
 # Ensure required directories exist before configuring logging
 try:
@@ -253,7 +254,6 @@ class JeedAIVTuber:
 
             # Transcribe using Whisper.cpp via STT handler
             try:
-                from audio.stt_handler import stt_handler
                 # Discord PCM is 16-bit mono @ 48kHz from VoiceRecvClient
                 text = await stt_handler.transcribe_audio(audio_data, sample_rate=sample_rate)
             except Exception as e:
