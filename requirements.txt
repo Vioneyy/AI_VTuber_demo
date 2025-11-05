@@ -1,41 +1,56 @@
-# ==========================================
-# Jeed AI VTuber - Python Dependencies (แก้ไขเวอร์ชันเสถียร)
-# ==========================================
+# Core Dependencies
+python-dotenv==1.0.0
+aiofiles==23.2.1
 
-# Core
-python-dotenv==1.0.1
-
-# Discord (ใช้ PyCord + Voice)
-py-cord==2.5.0
+# Discord
+discord.py[voice]==2.6.4
 PyNaCl==1.5.0
+aiohttp==3.9.5
+# Voice receive extension: pin to latest AEAD-supported build
+discord-ext-voice-recv @ git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git@0.5.3a180
 
-# OpenAI
-openai>=1.30.0
+# AI/ML - Fixed versions to prevent conflicts
+torch==2.1.0
+torchaudio==2.1.0
+torchvision==0.16.0
 
-# Audio Processing (แก้ NumPy binary incompatibility)
-numpy==1.26.4  # เวอร์ชันเสถียรบน Windows; ลด error dtype size changed
+# Numpy - FIX: Use compatible version
+numpy==1.24.3
+
+# Audio Processing
 soundfile==0.12.1
-noisereduce==3.0.0
+librosa==0.10.1
+pyaudio==0.2.14
+pydub==0.25.1
 scipy==1.11.4
 
-# TTS (F5-TTS-Thai / Torch)
-# หมายเหตุ: ติดตั้ง Torch/Audio ตามแพลตฟอร์ม (CPU/GPU) ให้เข้ากัน
-torch
-torchaudio
-transformers==4.43.3
-# f5-tts - แนะนำติดตั้งแยกจาก git:
-# pip install git+https://github.com/DomhnallBoyle/f5-tts.git
+# TTS/STT
+# f5-tts-th - จะติดตั้งแยก
+openai-whisper==20231117
 
-# RVC (เพิ่ม rvc-python)
-# ติดตั้งแยกจาก git เพื่อรองรับโมดูล RVC:
-# pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git
+# RVC
+faiss-cpu==1.7.4
+praat-parselmouth==0.4.3
 
-# YouTube Live
-pytchat==0.5.5
+# OpenAI
+openai==1.3.0
 
-# VTube Studio / WebSocket
+# VTube Studio
 websockets==12.0
 
-# Utilities
-aiohttp==3.9.5
-pydantic==2.9.2
+# YouTube
+pytchat==0.5.3
+
+# Pandas/Sklearn - FIX: Compatible versions
+pandas==2.0.3
+scikit-learn==1.3.2
+
+# Other utilities
+requests==2.31.0
+Pillow==10.1.0
+colorama==0.4.6
+tqdm==4.66.1
+
+# Note:
+# - Do NOT install the third-party 'asyncio' package. Python ships asyncio in the stdlib.
+#   Installing the PyPI 'asyncio' will shadow stdlib and cause event loop issues.

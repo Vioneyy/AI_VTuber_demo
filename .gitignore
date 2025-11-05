@@ -23,6 +23,7 @@ models/*.pth
 models/*.onnx
 models/*.pt
 models/*.ckpt
+tools/ffmpeg/
 
 # RVC indices can exceed 100MB (skip without LFS)
 rvc_models/*.index

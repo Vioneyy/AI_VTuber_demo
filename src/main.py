@@ -1,387 +1,392 @@
 """
-Main entry point สำหรับ AI VTuber
-แก้ไขปัญหา: Processing/Animation Loop หยุดเมื่อมี Discord error
+Jeed AI VTuber - Main Application
+เวอร์ชันที่แก้ไขปัญหาทั้งหมด
 """
 import asyncio
 import logging
-import sys
 import signal
+import sys
 from pathlib import Path
-from typing import Optional
+import io
 
-# Import core modules
-from core.config import Config
-from core.scheduler import PriorityScheduler
-from personality.personality import PersonalityManager
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent))
 
-# Import adapters
-from adapters.discord_bot import DiscordBot
-from adapters.youtube_live import YouTubeLive
-from adapters.vts.vts_controller import VTSController
-from adapters.tts.f5_tts_thai import F5TTSThai
+from config import Config
+from core.queue_manager import SmartQueueManager, QueueItem
+from adapters.discord_bot import DiscordBotAdapter
 
-# Import audio modules
-from audio.rvc_v2 import RVCProcessor
-from audio.stt_whispercpp import WhisperCPP
-
-# Import LLM
-from llm.chatgpt_client import ChatGPTClient
+# Ensure required directories exist before configuring logging
+try:
+    Config.create_directories()
+except Exception:
+    # If directory creation fails, fallback to console-only logging
+    pass
 
 # Setup logging
+# Configure logging with UTF-8 safe console handler
+try:
+    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    utf8_stdout = sys.stdout
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('vtuber.log', encoding='utf-8')
+        logging.FileHandler(str(Config.LOGS_DIR / 'ai_vtuber.log'), encoding='utf-8'),
+        logging.StreamHandler(utf8_stdout)
     ]
 )
+
 logger = logging.getLogger(__name__)
 
-
-class AIVTuber:
+class JeedAIVTuber:
     """Main AI VTuber application"""
     
     def __init__(self):
-        self.config = Config()
-        self.running = False
-        self.shutdown_event = asyncio.Event()
+        """Initialize AI VTuber"""
+        self.config = Config
         
-        # Core components
-        self.scheduler: Optional[PriorityScheduler] = None
-        self.personality: Optional[PersonalityManager] = None
-        self.llm: Optional[ChatGPTClient] = None
-        self.tts: Optional[F5TTSThai] = None
-        self.rvc: Optional[RVCProcessor] = None
-        self.vts: Optional[VTSController] = None
-        
-        # Adapters
-        self.discord_bot: Optional[DiscordBot] = None
-        self.youtube_live: Optional[YouTubeLive] = None
-        self.stt: Optional[WhisperCPP] = None
+        # Components
+        self.queue_manager: SmartQueueManager = None
+        self.discord_bot: DiscordBotAdapter = None
+        self.vts_client = None  # VTube Studio client
+        self.tts_engine = None  # TTS engine
+        self.llm_processor = None  # LLM processor
         
         # Tasks
         self.tasks = []
+        self.running = False
+        self._stopping = False
         
+        logger.info("🎮 Jeed AI VTuber initialized")
+    
     async def initialize(self):
         """Initialize all components"""
+        logger.info("=" * 60)
+        logger.info("🎮 Jeed AI VTuber Starting...")
+        logger.info("=" * 60)
+        
+        # Validate config
+        is_valid, errors = self.config.validate()
+        if not is_valid:
+            logger.error("❌ Configuration errors:")
+            for error in errors:
+                logger.error(f"  {error}")
+            if any("❌" in e for e in errors):
+                raise ValueError("Critical configuration errors")
+        
+        logger.info("✅ การตั้งค่าถูกต้องทั้งหมด")
+        
+        # Create directories
+        self.config.create_directories()
+        
+        # Initialize Queue Manager
+        logger.info("📦 Initializing Queue Manager...")
+        self.queue_manager = SmartQueueManager(
+            max_size=self.config.QUEUE_MAX_SIZE,
+            admin_ids=self.config.ADMIN_USER_IDS
+        )
+        logger.info("✅ Queue Manager ready")
+        
+        # Initialize TTS Engine via unified handler (uses F5-TTS placeholder + RVC)
+        logger.info("📦 Loading TTS engine...")
         try:
-            logger.info("="*60)
-            logger.info("🎮 Jeed AI VTuber Starting...")
-            logger.info("="*60)
-            
-            # Validate configuration
-            self.config.validate()
-            logger.info("✅ การตั้งค่าถูกต้องทั้งหมด")
-            
-            # Print configuration
-            self._print_config()
-            
-            # Initialize TTS
-            logger.info("📦 Loading TTS engine...")
-            self.tts = F5TTSThai(
-                device=self.config.AUDIO_DEVICE,
-                reference_wav=self.config.TTS_REFERENCE_WAV
-            )
-            logger.info("✅ TTS loaded")
-            
-            # Initialize RVC if enabled
-            if self.config.ENABLE_RVC:
-                logger.info("📦 Loading RVC model...")
-                self.rvc = RVCProcessor(
-                    model_path=self.config.RVC_MODEL_PATH,
-                    device=self.config.AUDIO_DEVICE
-                )
-                logger.info("✅ RVC loaded")
-            
-            # Initialize STT if enabled
-            if self.config.DISCORD_VOICE_STT_ENABLED:
-                logger.info("📦 Loading STT engine...")
-                self.stt = WhisperCPP(
-                    bin_path=self.config.WHISPER_CPP_BIN_PATH,
-                    model_path=self.config.WHISPER_CPP_MODEL_PATH,
-                    language=self.config.WHISPER_CPP_LANG,
-                    threads=self.config.WHISPER_CPP_THREADS,
-                    n_gpu_layers=self.config.WHISPER_CPP_NGL
-                )
-                logger.info("✅ STT loaded")
-            
-            # Initialize scheduler
-            self.scheduler = PriorityScheduler(
-                response_timeout=self.config.RESPONSE_TIMEOUT
-            )
-            
-            # Initialize personality
-            self.personality = PersonalityManager(
-                persona_path=Path("src/personality/persona.json")
-            )
-            
-            # Initialize LLM
-            self.llm = ChatGPTClient(
-                api_key=self.config.OPENAI_API_KEY,
-                model=self.config.LLM_MODEL,
-                temperature=self.config.LLM_TEMPERATURE,
-                max_tokens=self.config.LLM_MAX_TOKENS
-            )
-            
-            # Initialize VTS
-            if self.config.VTS_PLUGIN_NAME:
-                logger.info("📡 เชื่อมต่อ VTube Studio...")
-                self.vts = VTSController(
-                    plugin_name=self.config.VTS_PLUGIN_NAME,
-                    model_name=self.config.VTS_MODEL_NAME
-                )
-                await self.vts.connect()
-                logger.info("✅ VTube Studio พร้อมใช้งาน")
-            
-            # Initialize Discord Bot
-            if self.config.DISCORD_BOT_TOKEN:
-                logger.info("🤖 เริ่ม Discord Bot...")
-                self.discord_bot = DiscordBot(
-                    token=self.config.DISCORD_BOT_TOKEN,
-                    scheduler=self.scheduler,
-                    stt_engine=self.stt,
-                    config=self.config
-                )
-            
-            # Initialize YouTube Live
-            if self.config.YOUTUBE_STREAM_ID:
-                logger.info("📺 เริ่ม YouTube Live...")
-                self.youtube_live = YouTubeLive(
-                    stream_id=self.config.YOUTUBE_STREAM_ID,
-                    scheduler=self.scheduler
-                )
-            
-            logger.info("="*60)
-            logger.info("✅ Jeed AI VTuber พร้อมแล้ว!")
-            logger.info("="*60)
-            self._print_commands()
-            logger.info("="*60)
-            
+            from audio.tts_rvc_handler import tts_rvc_handler
+            self.tts_engine = tts_rvc_handler
+            logger.info("✅ TTS handler loaded")
         except Exception as e:
-            logger.error(f"❌ Initialization failed: {e}")
-            raise
-    
-    def _print_config(self):
-        """Print current configuration"""
-        print("="*50)
-        print("🎮 Jeed AI VTuber Configuration")
-        print("="*50)
-        print(f"LLM Model: {self.config.LLM_MODEL}")
-        print(f"TTS Engine: {self.config.TTS_ENGINE}")
-        print(f"RVC Enabled: {self.config.ENABLE_RVC}")
-        print(f"VTube Studio: {self.config.VTS_MODEL_NAME}")
-        print(f"Discord Bot: {'Enabled' if self.config.DISCORD_BOT_TOKEN else 'Disabled'}")
-        print(f"YouTube Live: {'Enabled' if self.config.YOUTUBE_STREAM_ID else 'Disabled'}")
-        print(f"GPU Acceleration: {self.config.AUDIO_DEVICE != 'cpu'}")
-        print("="*50)
-    
-    def _print_commands(self):
-        """Print available commands"""
-        if self.discord_bot:
-            print("คำสั่ง Discord Bot:")
-            print("  !join         - เข้าห้องเสียง")
-            print("  !leave        - ออกจากห้องเสียง")
-            print("  !listen [วินาที] - บันทึกเสียงและถอดความ")
-            print("  !test         - ทดสอบบอท")
-            print("  !ping         - ตรวจสอบ latency")
-            print("  !stats        - แสดงสถิติ")
-        if self.youtube_live:
-            print("  !youtube on/off - เปิด/ปิดรับคอมเม้น YouTube ในคิว")
+            logger.warning(f"⚠️  TTS handler failed to load: {e}")
+            self.tts_engine = None
+            logger.warning("⚠️  Continuing without TTS")
+        
+        # Initialize VTube Studio Controller (updated import path)
+        logger.info("📡 เชื่อมต่อ VTube Studio...")
+        try:
+            from adapters.vts.vts_controller import VTSController
+            # ใช้ค่า plugin_name จาก Config หากมี
+            self.vts_client = VTSController(plugin_name=self.config.VTS_PLUGIN_NAME)
+            await self.vts_client.connect()
+            logger.info("✅ VTube Studio พร้อมใช้งาน")
+        except Exception as e:
+            logger.warning(f"⚠️  VTube Studio connection failed: {e}")
+            logger.warning("⚠️  Continuing without VTS")
+            self.vts_client = None
+        
+        # Initialize Discord Bot
+        logger.info("🤖 เริ่ม Discord Bot...")
+        self.discord_bot = DiscordBotAdapter(
+            token=self.config.DISCORD_BOT_TOKEN,
+            admin_ids=self.config.ADMIN_USER_IDS
+        )
+        
+        # Set callbacks
+        self.discord_bot.on_voice_input = self._handle_voice_input
+        self.discord_bot.on_text_command = self._handle_text_command
+        # ส่งสถานะระบบภายนอกให้ Discord Bot สำหรับรายงานในห้อง
+        try:
+            self.discord_bot.update_external_status(
+                vts_connected=(self.vts_client is not None),
+                tts_ready=(self.tts_engine is not None),
+                queue_ready=(self.queue_manager is not None)
+            )
+        except Exception:
+            pass
+        
+        # Print config
+        self.config.print_config()
+        
+        logger.info("=" * 60)
+        logger.info("✅ Jeed AI VTuber พร้อมแล้ว!")
+        logger.info("=" * 60)
     
     async def start(self):
-        """Start all components"""
+        """Start the application"""
         try:
+            await self.initialize()
+            
             self.running = True
             
-            # Start processing loop (CRITICAL: ไม่ให้หยุดแม้มี error)
-            processing_task = asyncio.create_task(
-                self._processing_loop(),
-                name="ProcessingLoop"
+            # Start Discord Bot
+            bot_task = asyncio.create_task(
+                self._run_discord_bot_supervisor(),
+                name="discord_bot"
             )
-            self.tasks.append(processing_task)
+            self.tasks.append(bot_task)
             
-            # Start animation loop (CRITICAL: ไม่ให้หยุดแม้มี error)
-            if self.vts:
+            # Start Queue Processor
+            logger.info("=" * 60)
+            queue_task = asyncio.create_task(
+                self.queue_manager.process_queue(self._process_queue_item),
+                name="queue_processor"
+            )
+            self.tasks.append(queue_task)
+            logger.info("🔄 เริ่ม Processing Loop")
+            
+            # Start VTS Animation (if available)
+            if self.vts_client:
                 animation_task = asyncio.create_task(
-                    self._animation_loop(),
-                    name="AnimationLoop"
+                    self._vts_animation_loop(),
+                    name="vts_animation"
                 )
                 self.tasks.append(animation_task)
+                logger.info("🎬 เริ่ม Animation Loop")
             
-            # Start Discord Bot (แยก task เพื่อไม่ให้ crash ระบบ)
-            if self.discord_bot:
-                discord_task = asyncio.create_task(
-                    self._run_discord_bot(),
-                    name="DiscordBot"
-                )
-                self.tasks.append(discord_task)
+            # Wait for all tasks
+            await asyncio.gather(*self.tasks, return_exceptions=True)
             
-            # Start YouTube Live
-            if self.youtube_live:
-                youtube_task = asyncio.create_task(
-                    self.youtube_live.start(),
-                    name="YouTubeLive"
-                )
-                self.tasks.append(youtube_task)
-            
-            # Wait for shutdown signal
-            await self.shutdown_event.wait()
-            
+        except KeyboardInterrupt:
+            logger.info("🛑 รับ signal หยุดทำงาน")
         except Exception as e:
-            logger.error(f"❌ Error in start: {e}")
-            raise
+            logger.error(f"❌ Fatal error: {e}", exc_info=True)
+        finally:
+            await self.stop()
     
-    async def _run_discord_bot(self):
-        """Run Discord bot in separate task with error handling"""
-        try:
-            await self.discord_bot.start()
-        except Exception as e:
-            logger.error(f"❌ Discord bot error: {e}")
-            # ไม่ raise error เพื่อไม่ให้ระบบหยุด
-            # แค่ log error และให้ระบบทำงานต่อ
-    
-    async def _processing_loop(self):
-        """
-        Main processing loop - MUST NEVER STOP
-        ประมวลผลข้อความจาก queue อย่างต่อเนื่อง
-        """
-        logger.info("🔄 เริ่ม Processing Loop")
-        
-        while self.running:
-            try:
-                # Get next message from queue
-                message = await self.scheduler.get_next()
-                
-                if not message:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # Process message
-                await self._process_message(message)
-                
-            except asyncio.CancelledError:
-                logger.info("🛑 Processing Loop cancelled")
-                break
-            except Exception as e:
-                # CRITICAL: Log error แต่ไม่หยุดทำงาน
-                logger.error(f"❌ Error in processing loop: {e}", exc_info=True)
-                await asyncio.sleep(1)  # รอแป๊บก่อน retry
-                continue  # ทำงานต่อไป
-        
-        logger.info("🛑 Processing Loop หยุดทำงาน")
-    
-    async def _animation_loop(self):
-        """
-        Animation loop for VTS - MUST NEVER STOP
-        อัพเดท animation อย่างต่อเนื่อง
-        """
-        logger.info("🎬 เริ่ม Animation Loop")
-        
-        while self.running and self.vts:
-            try:
-                # Update VTS animations
-                await self.vts.update_idle_motion()
-                await asyncio.sleep(0.1)  # 10 FPS
-                
-            except asyncio.CancelledError:
-                logger.info("🛑 Animation Loop cancelled")
-                break
-            except Exception as e:
-                # CRITICAL: Log error แต่ไม่หยุดทำงาน
-                logger.error(f"❌ Error in animation loop: {e}", exc_info=True)
-                await asyncio.sleep(1)
-                continue  # ทำงานต่อไป
-        
-        logger.info("🛑 Animation Loop หยุดทำงาน")
-    
-    async def _process_message(self, message):
-        """Process a single message"""
-        try:
-            # Get LLM response
-            response = await self.llm.get_response(
-                message.text,
-                personality=self.personality.get_prompt()
-            )
-            
-            # Generate TTS
-            audio_data = await self.tts.generate(response)
-            
-            # Apply RVC if enabled
-            if self.rvc and audio_data:
-                audio_data = await self.rvc.convert(audio_data)
-            
-            # Update VTS expressions
-            if self.vts:
-                await self.vts.set_talking(True)
-                # Play audio and update lip sync
-                await asyncio.sleep(len(audio_data) / 48000)  # Duration
-                await self.vts.set_talking(False)
-            
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-    
-    async def shutdown(self):
-        """Graceful shutdown"""
+    async def stop(self):
+        """Stop the application"""
+        if self._stopping:
+            logger.info("ℹ️ ระบบกำลังหยุดอยู่แล้ว")
+            return
+        self._stopping = True
+
         logger.info("🛑 กำลังหยุดระบบ...")
+
+        # Signal loops to stop
         self.running = False
-        self.shutdown_event.set()
-        
-        # Cancel all tasks
-        for task in self.tasks:
+
+        # Stop Discord Bot first to close websocket and aiohttp session cleanly
+        if self.discord_bot:
+            try:
+                await self.discord_bot.stop()
+            except Exception as e:
+                logger.debug(f"Ignoring Discord stop error: {e}")
+
+        # Disconnect VTS next
+        if self.vts_client:
+            try:
+                logger.info("🛑 กำลังตัดการเชื่อมต่อ VTS...")
+                await self.vts_client.disconnect()
+                logger.info("👋 ตัดการเชื่อมต่อ VTS เรียบร้อย")
+            except Exception as e:
+                logger.debug(f"Ignoring VTS disconnect error: {e}")
+
+        # Stop Queue Manager
+        if self.queue_manager:
+            try:
+                await self.queue_manager.stop()
+            except Exception as e:
+                logger.debug(f"Ignoring QueueManager stop error: {e}")
+
+        # Cancel any remaining tasks (e.g., queue loop, animation loop)
+        for task in list(self.tasks):
             if not task.done():
                 task.cancel()
-        
-        # Wait for tasks to finish
-        await asyncio.gather(*self.tasks, return_exceptions=True)
-        
-        # Disconnect VTS
-        if self.vts:
-            logger.info("🛑 กำลังตัดการเชื่อมต่อ VTS...")
-            await self.vts.disconnect()
-            logger.info("👋 ตัดการเชื่อมต่อ VTS เรียบร้อย")
-        
-        # Stop Discord bot
-        if self.discord_bot:
-            await self.discord_bot.stop()
-        
-        # Stop YouTube live
-        if self.youtube_live:
-            await self.youtube_live.stop()
-        
-        logger.info("👋 ระบบหยุดแล้ว")
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"🛑 {task.get_name()} cancelled")
+                except Exception as e:
+                    logger.debug(f"Task {task.get_name()} stop error (ignored): {e}")
 
+        logger.info("👋 ระบบหยุดแล้ว")
+        logger.info("👋 บ๊ายบาย~")
+
+    async def _run_discord_bot_supervisor(self):
+        """รัน Discord bot และรีสตาร์ทอัตโนมัติเมื่อหลุดด้วยโค้ด 4006/ข้อผิดพลาดชั่วคราว"""
+        while self.running and not self._stopping:
+            try:
+                await self.discord_bot.start()
+            except Exception as e:
+                # ไม่หยุดทั้งระบบเมื่อ bot หลุด ให้ลองใหม่หลังพักสั้น ๆ
+                logger.warning(f"⚠️ Discord bot disconnected: {e}. Retrying in 3s...")
+                await asyncio.sleep(3)
+                continue
+            else:
+                # start() ออกมาแบบปกติ (ถูกสั่ง stop) ให้จบ loop
+                break
+    
+    async def _handle_voice_input(self, user, audio_data: bytes, sample_rate: int):
+        """Handle voice input from Discord"""
+        try:
+            logger.info(f"🎤 Received voice from {user}")
+
+            # Transcribe using Whisper.cpp via STT handler
+            try:
+                from audio.stt_handler import stt_handler
+                # Discord PCM is 16-bit mono @ 48kHz from VoiceRecvClient
+                text = await stt_handler.transcribe_audio(audio_data, sample_rate=sample_rate)
+            except Exception as e:
+                logger.warning(f"⚠️ STT handler failed: {e}")
+                text = None
+
+            # If transcription is empty, ignore this chunk
+            if not text or not text.strip():
+                logger.debug("🕸️ Empty/undetected speech chunk, skipping queue")
+                return
+
+            # Enqueue transcribed text for LLM/TTS processing
+            await self.queue_manager.add_to_queue(
+                content=text.strip(),
+                source="voice",
+                user_id=str(user.id),
+                user_name=user.name,
+                metadata={'sample_rate': sample_rate}
+            )
+        
+        except Exception as e:
+            logger.error(f"Error handling voice input: {e}")
+    
+    async def _handle_text_command(self, user_id: str, content: str):
+        """Handle text command"""
+        await self.queue_manager.add_to_queue(
+            content=content,
+            source="text",
+            user_id=user_id,
+            user_name="User"
+        )
+    
+    async def _process_queue_item(self, item: QueueItem):
+        """
+        Process queue item
+        
+        This is where the magic happens:
+        1. Get text input (from voice/text)
+        2. Generate response with LLM
+        3. Generate speech with TTS
+        4. Animate VTube Studio model
+        5. Play audio in Discord
+        """
+        try:
+            # 1. Get input text (voice already transcribed at enqueue stage)
+            text_input = item.content
+            
+            logger.info(f"💭 Input: {text_input}")
+            
+            # 2. Generate response with LLM (personality-aware)
+            logger.info("🧠 Generating response...")
+            try:
+                from llm.llm_handler import llm_handler
+                response_text = await llm_handler.generate_response(text_input)
+            except Exception as e:
+                logger.warning(f"⚠️ LLM generation failed: {e}")
+                response_text = f"เอ๊ะ หนูติดขัดนิดหน่อย แต่ได้ยินว่า: {text_input[:60]}..."
+            logger.info(f"💬 Response: {response_text}")
+            
+            # 3. Generate speech with TTS
+            logger.info("🎤 Generating speech...")
+            if self.tts_engine:
+                audio_data, output_path = await self.tts_engine.generate_speech(
+                    response_text
+                )
+                # ใช้ sample rate จาก core config ของ TTS
+                try:
+                    from core.config import config as core_config
+                    sample_rate = core_config.tts.sample_rate
+                except Exception:
+                    sample_rate = self.config.AUDIO_SAMPLE_RATE
+            else:
+                logger.warning("⚠️  No TTS engine available")
+                audio_data, sample_rate = None, None
+            
+            # 4. Animate VTube Studio model (minimal integration)
+            if self.vts_client:
+                try:
+                    await self.vts_client.set_talking(True)
+                except Exception:
+                    pass
+            
+            # 5. Play audio in Discord
+            if audio_data is not None and self.discord_bot.voice_client:
+                logger.info("🔊 Playing audio...")
+                await self.discord_bot.play_audio(audio_data, sample_rate)
+            
+            # Stop talking animation after playback
+            if self.vts_client:
+                try:
+                    await self.vts_client.set_talking(False)
+                except Exception:
+                    pass
+            
+            logger.info("✅ Completed processing")
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing queue item: {e}", exc_info=True)
+    
+    async def _vts_animation_loop(self):
+        """VTube Studio animation loop"""
+        try:
+            while self.running:
+                # Animation handled by VTSController internally; keep loop lightweight
+                await asyncio.sleep(1/60)  # 60 FPS
+        except asyncio.CancelledError:
+            logger.info("🛑 Animation Loop cancelled")
+        except Exception as e:
+            logger.error(f"❌ Animation loop error: {e}")
 
 async def main():
     """Main entry point"""
-    vtuber = AIVTuber()
+    vtuber = JeedAIVTuber()
     
     # Setup signal handlers
     def signal_handler(sig, frame):
         logger.info("🛑 รับ signal หยุดทำงาน")
-        asyncio.create_task(vtuber.shutdown())
+        asyncio.create_task(vtuber.stop())
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        # Initialize
-        await vtuber.initialize()
-        
-        # Start
         await vtuber.start()
-        
-    except KeyboardInterrupt:
-        logger.info("🛑 รับ Ctrl+C")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}", exc_info=True)
-    finally:
-        await vtuber.shutdown()
-        logger.info("👋 บ๊ายบาย~")
-
+        await vtuber.stop()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logger.info("👋 Goodbye!")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}", exc_info=True)
+        sys.exit(1)

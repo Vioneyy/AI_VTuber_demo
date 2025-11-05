@@ -11,6 +11,7 @@ import wave
 import numpy as np
 from pathlib import Path
 from typing import Optional
+import importlib
 
 import sys
 sys.path.append('..')
@@ -23,6 +24,8 @@ class STTHandler:
         self.whisper_bin = Path(config.stt.whisper_bin_path)
         self.model_path = Path(config.stt.whisper_model_path)
         self.total_processed = 0
+        self._py_whisper_model = None
+        self._py_whisper_model_name = os.getenv("PY_WHISPER_MODEL", "medium")
         
         # ตรวจสอบไฟล์
         if not self.whisper_bin.exists():
@@ -45,8 +48,17 @@ class STTHandler:
                 tmp_path = tmp_file.name
                 self._save_wav(tmp_path, audio_data, sample_rate)
             
-            # เรียก Whisper.cpp
-            text = await self._run_whisper(tmp_path)
+            # เรียก Whisper.cpp หรือ fallback ไปใช้ Python Whisper
+            text: Optional[str] = None
+            if self.whisper_bin.exists():
+                text = await self._run_whisper(tmp_path)
+                # ถ้า Whisper.cpp ล้มเหลว ลอง fallback แบบ Python อีกครั้ง
+                if not text:
+                    print("🔁 Whisper.cpp ไม่ได้ผล ลองใช้ Python Whisper แทน")
+                    text = await self._run_python_whisper(tmp_path)
+            else:
+                print("🔁 ใช้ Python Whisper fallback (ไม่พบ Whisper.cpp)")
+                text = await self._run_python_whisper(tmp_path)
             
             # ลบไฟล์ชั่วคราว
             try:
@@ -112,6 +124,40 @@ class STTHandler:
         except Exception as e:
             print(f"❌ Whisper Error: {e}")
             return None
+
+    async def _run_python_whisper(self, audio_path: str) -> Optional[str]:
+        """เรียก Python Whisper (openai-whisper) แบบ non-blocking ด้วย to_thread"""
+        def _transcribe_blocking() -> Optional[str]:
+            try:
+                whisper = importlib.import_module("whisper")
+            except Exception:
+                print("❌ ไม่พบไลบรารี Python Whisper (openai-whisper). ติดตั้งด้วย: pip install -U openai-whisper")
+                return None
+
+            try:
+                # ตรวจสอบ GPU แบบไดนามิก เพื่อหลีกเลี่ยง error เมื่อไม่มี CUDA
+                try:
+                    import torch  # ตรวจสอบสถานะ CUDA แบบ runtime
+                    use_gpu = torch.cuda.is_available()
+                except Exception:
+                    use_gpu = False
+                device = "cuda" if use_gpu else "cpu"
+                # แคชโมเดลไว้ใช้งานซ้ำเพื่อความเร็ว
+                if self._py_whisper_model is None:
+                    print(f"⬇️ กำลังโหลดโมเดล Python Whisper: {self._py_whisper_model_name} ({device})")
+                    self._py_whisper_model = whisper.load_model(self._py_whisper_model_name, device=device)
+
+                # ตั้งค่า fp16 เมื่อใช้ GPU เพื่อความเร็ว
+                fp16 = use_gpu
+                result = self._py_whisper_model.transcribe(audio_path, language=config.stt.language, fp16=fp16)
+                text = (result.get("text") or "").strip()
+                return text if text else None
+            except Exception as e:
+                print(f"❌ Python Whisper Error: {e}")
+                return None
+
+        # รันงานบล็อกแบบ off-thread เพื่อไม่บล็อก event loop
+        return await asyncio.to_thread(_transcribe_blocking)
     
     def _save_wav(self, path: str, audio_data: bytes, sample_rate: int):
         """บันทึกไฟล์ WAV"""
@@ -130,8 +176,16 @@ class STTHandler:
         if not Path(file_path).exists():
             print(f"❌ ไม่พบไฟล์: {file_path}")
             return None
-        
-        return await self._run_whisper(file_path)
+        # เลือกใช้ Whisper.cpp หรือ fallback Python
+        if self.whisper_bin.exists():
+            text = await self._run_whisper(file_path)
+            if text:
+                return text
+            print("🔁 Whisper.cpp ไม่ได้ผล ลองใช้ Python Whisper แทน")
+            return await self._run_python_whisper(file_path)
+        else:
+            print("🔁 ใช้ Python Whisper fallback (ไม่พบ Whisper.cpp)")
+            return await self._run_python_whisper(file_path)
     
     def get_stats(self):
         """ดูสถิติ"""
