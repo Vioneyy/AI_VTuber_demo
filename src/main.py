@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
-from audio.stt_handler import stt_handler  # โหลดครั้งเดียวเพื่อคงโมเดลไว้ในหน่วยความจำ
+from audio.faster_whisper_stt import FasterWhisperSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
+from audio.edge_tts_handler import EdgeTTSHandler  # ใช้ Edge-TTS แทน RVC เพื่อความเร็วและเสียงธรรมชาติ
 from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
 from llm.chatgpt_client import ChatGPTClient
@@ -53,6 +54,7 @@ class JeedAIVTuber:
         self.vts_client = None  # VTube Studio client
         self.tts_engine = None  # TTS engine
         self.llm_processor = None  # LLM processor
+        self.stt_handler = None  # STT engine (Faster-Whisper)
         
         # Tasks
         self.tasks = []
@@ -82,12 +84,21 @@ class JeedAIVTuber:
             admin_ids=self.config.ADMIN_USER_IDS
         )
         logger.info("✅ Queue Manager ready")
-        
-        # Initialize TTS Engine via unified handler (uses F5-TTS placeholder + RVC)
-        logger.info("📦 Loading TTS engine...")
+
+        # Initialize STT Engine (Faster-Whisper)
+        logger.info("📦 Loading STT engine (Faster-Whisper)...")
         try:
-            from audio.tts_rvc_handler import tts_rvc_handler
-            self.tts_engine = tts_rvc_handler
+            self.stt_handler = STTHandler()
+            logger.info("✅ STT handler loaded")
+        except Exception as e:
+            logger.warning(f"⚠️  STT handler failed to load: {e}")
+            self.stt_handler = None
+            logger.warning("⚠️  Continuing without STT")
+        
+        # Initialize TTS Engine (Edge-TTS)
+        logger.info("📦 Loading TTS engine (Edge-TTS)...")
+        try:
+            self.tts_engine = EdgeTTSHandler()
             logger.info("✅ TTS handler loaded")
         except Exception as e:
             logger.warning(f"⚠️  TTS handler failed to load: {e}")
@@ -262,7 +273,11 @@ class JeedAIVTuber:
             # Transcribe using Whisper.cpp via STT handler
             try:
                 # Discord PCM is 16-bit mono @ 48kHz from VoiceRecvClient
-                text = await stt_handler.transcribe_audio(audio_data, sample_rate=sample_rate)
+                if not self.stt_handler:
+                    logger.warning("⚠️ STT handler not initialized")
+                    text = None
+                else:
+                    text = await self.stt_handler.transcribe(audio_data, sample_rate=sample_rate)
             except Exception as e:
                 logger.warning(f"⚠️ STT handler failed: {e}")
                 text = None
@@ -331,7 +346,18 @@ class JeedAIVTuber:
                 logger.warning("⚠️ TTS engine not ready; cannot speak")
                 return
 
-            audio_data, output_path = await self.tts_engine.generate_speech(response_text)
+            # ใช้ RVC หากเปิดใช้งานและมีโมเดล
+            try:
+                use_rvc = getattr(core_config, 'rvc').enabled
+                rvc_model = Path(getattr(core_config, 'rvc').model_path)
+            except Exception:
+                use_rvc = False
+                rvc_model = None
+
+            if use_rvc and rvc_model and rvc_model.exists():
+                audio_data, tts_sample_rate = await self.tts_engine.generate_speech_with_rvc(response_text, rvc_model)
+            else:
+                audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
             if audio_data is None:
                 logger.warning("⚠️ TTS failed to generate audio")
                 return
@@ -345,7 +371,7 @@ class JeedAIVTuber:
             audio_data = audio_data - audio_data.mean()
 
             # 4) Play audio in Discord
-            sample_rate = core_config.tts.sample_rate
+            sample_rate = tts_sample_rate or core_config.tts.sample_rate
             if self.discord_bot and self.discord_bot.voice_client:
                 if self.vts_client:
                     try:

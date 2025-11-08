@@ -1,6 +1,7 @@
 # AI VTuber Demo
 
-โปรเจกต์ตัวอย่างเพื่อสาธิตการเชื่อมต่อ LLM, TTS, และ VTube Studio พร้อมอะแดปเตอร์สำหรับ Discord และ YouTube Live
+โปรเจกต์ตัวอย่างเพื่อสาธิตการเชื่อมต่อ LLM, TTS, และ VTube Studio พร้อมอะแดปเตอร์สำหรับ Discord และ YouTube Live (ปรับใหม่ให้ใช้ Edge-TTS + Faster-Whisper)
+รองรับการแปลงเสียงผ่าน RVC แบบทางเลือกด้วยเซิร์ฟเวอร์ภายนอก
 
 ## โครงสร้าง
 ```
@@ -27,14 +28,14 @@ AI_VTuber_demo/
      │     └─ system_prompt.txt
      ├─ adapters/
      │  ├─ __init__.py
-     │  ├─ discord_bot.py     # รับข้อความ, เข้าห้องเสียง, STT Whisper.cpp
+     │  ├─ discord_bot.py     # รับข้อความ, เข้าห้องเสียง, เล่นเสียง
      │  ├─ youtube_live.py    # อ่านแชท YouTube แบบเรียงลำดับ
-     │  ├─ tts/
      │  └─ vts/
      ├─ audio/
      │  ├─ __init__.py
-     │  ├─ rvc_v2.py          # RVC v2 (สคาฟโฟลด์)
-     │  └─ stt_whispercpp.py  # ตัวห่อเรียก whisper.cpp ด้วย GPU
+     │  ├─ edge_tts_handler.py        # TTS ด้วย Microsoft Edge (เร็ว/คุณภาพดี)
+     │  ├─ rvc_adapter.py            # ตัวแปลงเสียงผ่าน RVC REST server (ทางเลือก)
+     │  └─ faster_whisper_stt.py     # STT ด้วย Faster-Whisper (เร็ว/เสถียร)
      ├─ main.py
 ```
 
@@ -50,7 +51,7 @@ pip install -r requirements.txt
 ```
 3) สร้างไฟล์ `.env` โดยอ้างอิงจาก `.env.example`
 
-ตัวอย่าตต้องตั้งค่า:
+ตัวอย่างตัวแปรสำคัญที่ต้องตั้งค่า:
 - `DISCORD_BOT_TOKEN` โทเคนบอท Discord
 - `OPENAI_API_KEY` คีย์สำหรับสมองหลัก
 - `YOUTUBE_STREAM_ID` ไอดีสตรีม YouTube Live
@@ -60,40 +61,39 @@ pip install -r requirements.txt
 - `LLM_TEMPERATURE` ความสุ่มของคำตอบ (แนะนำ 0.2–0.4 เพื่อให้กระชับ)
 - `LLM_MAX_TOKENS` จำกัดความยาวคำตอบ (แนะนำ 128 เพื่อความเร็ว)
 - `RESPONSE_TIMEOUT` ค่าเริ่มต้น 10 วินาที
-- `TTS_ENGINE` ตั้งค่าเป็น `f5_tts_thai` เพื่อใช้ F5-TTS-THAI
-- `TTS_REFERENCE_WAV` ไฟล์อ้างอิงเสียงผู้พูด (ช่วยกำหนดโทน)
-- `ENABLE_RVC` เปิด/ปิดตัวแปลงเสียง RVC v2 (สคาฟโฟลด์)
-- `VOICE_PRESET` พรีเซ็ตเสียง เช่น `anime_girl`, `deep_male`, `narrator`
 
-### เพิ่มสำหรับ STT (Whisper.cpp)
-- `WHISPER_CPP_BIN_PATH` พาธไปที่ `main.exe` ของ whisper.cpp
-- `WHISPER_CPP_MODEL_PATH` พาธไปที่ไฟล์โมเดล ggml เช่น `ggml-small.bin`
-- `WHISPER_CPP_LANG` ภาษาถอดความ (เช่น `th`)
-- `WHISPER_CPP_THREADS` จำนวน threads (เช่น 4)
-- `WHISPER_CPP_NGL` จำนวนเลเยอร์ offload ไป GPU (เช่น 35)
-- `WHISPER_CPP_TIMEOUT_MS` เวลารอในมิลลิวินาที (เช่น 5000)
-- `DISCORD_VOICE_STT_ENABLED` เปิด/ปิดคำสั่ง STT สำหรับเสียง
+### STT (Faster-Whisper)
+- ไม่ต้อง build อะไรเพิ่ม ติดตั้งผ่าน `pip install faster-whisper`
+- ตั้งค่าภาษาที่ต้องการใน `.env` เช่น `WHISPER_LANG=th`
+- รองรับ GPU อัตโนมัติผ่าน CTranslate2 (ขึ้นกับไลบรารีที่ติดตั้งโดยแพ็กเกจ)
 
-> หมายเหตุ: ต้อง build whisper.cpp ด้วย CUDA/cuBLAS หรือ OpenCL เพื่อให้ `-ngl` ใช้งาน GPU ได้
+### TTS (Edge-TTS)
+- ใช้ Microsoft Edge-TTS (ฟรี/เร็ว/เสียงธรรมชาติ)
+- ติดตั้ง `pip install edge-tts`
+- สามารถเลือกเสียงไทย เช่น `th-TH-PremwadeeNeural`, `th-TH-NiwatNeural`
 
 ## การรัน (โหมดสาธิต)
 ```
 python src/main.py
 ```
 
-## ใช้ STT ใน Discord
+## ใช้บอทใน Discord
 - คำสั่ง `!join` ให้บอทเข้าห้องเสียง
-- คำสั่ง `!listen <seconds>` บันทึกเสียงช่วงสั้น ๆ (ดีฟอลต์ 5 วินาที) แล้วถอดความด้วย Whisper.cpp
+- พูดในห้องเสียง บอทจะถอดความด้วย Faster-Whisper และตอบเสียงด้วย Edge-TTS
 - คำสั่ง `!leave` ออกจากห้องเสียง
 
 หมายเหตุ:
-- ต้องตั้งค่า `.env` ให้เปิด STT โดยกำหนด `DISCORD_VOICE_STT_ENABLED=true`
-- ตั้ง `WHISPER_CPP_BIN_PATH` ไปยังไบนารี `main.exe` ที่ build แบบ GPU (CUDA/cuBLAS หรือ OpenCL)
-- เลือกโมเดลตามกำลังเครื่อง เช่น `ggml-small.bin` และตั้ง `WHISPER_CPP_LANG=th` สำหรับภาษาไทย
-- ปรับ `WHISPER_CPP_THREADS` ให้เหมาะกับ CPU และ `WHISPER_CPP_NGL` เพื่อ offload ไป GPU (เช่น 35 หรือ 999 ขึ้นกับรุ่นที่ build)
-- เวลา `timeout` ใช้ `WHISPER_CPP_TIMEOUT_MS` (เช่น 10000)
+- บอทจะถอดความและพูดตอบโดยอัตโนมัติโดยใช้ Edge-TTS เป็นฐานเสียง
+- หากตั้งค่า `ENABLE_RVC=true` และมีเซิร์ฟเวอร์ RVC พร้อมใช้งาน ระบบจะส่งเสียงไปแปลงผ่าน RVC แล้วเล่นใน Discord
+- ข้อความที่ถอดความจะถูกส่งเข้า `QueueManager` และประมวลผลเหมือนข้อความแชทปกติ (ส่งต่อเข้า LLM, สร้าง TTS, ฯลฯ)
 
-ข้อความที่ถอดความจะถูกส่งเข้า `PriorityScheduler` และประมวลผลเหมือนข้อความแชทปกติ (ส่งต่อเข้า LLM, สร้าง TTS, ฯลฯ)
+### RVC (ทางเลือก)
+- ตั้งค่าใน `.env`:
+  - `ENABLE_RVC=true`
+  - `RVC_MODEL_PATH` ชี้ไปที่โมเดลใน `d:\AI_VTuber_demo\rvc_models\...`
+  - `RVC_SERVER_URL` URL ของ REST endpoint สำหรับแปลงเสียง เช่น `http://localhost:7860/api/convert`
+- รันเซิร์ฟเวอร์ RVC ที่รองรับการรับไฟล์เสียงและคืนไฟล์เสียงที่แปลงแล้ว (ตัวอย่างเช่น Mangio-RVC-WebUI ที่เพิ่ม REST API)
+- หากการแปลงล้มเหลว ระบบจะ fallback เป็นเสียงจาก Edge-TTS ตามเดิม
 
 ## การปรับ Motion เพื่อความเสถียร
 - ปรับการเร่ง/หน่วง (acceleration/deceleration) ให้เริ่ม-หยุดนุ่มนวลขึ้นผ่านการปรับโค้ง interpolation ในตัวควบคุมการเคลื่อนไหว
@@ -114,7 +114,6 @@ python src/main.py
 - หากยังเอียงมากไป สามารถลดสเกล `FaceAngleZ` เพิ่มเติม หรือปรับช่วง clamp ใน `src/adapters/vts/motion_controller.py`
 - ไม่มีหน้า Web UI สำหรับดูพฤติกรรม motion ในโปรเจกต์นี้ ขณะทดสอบให้สังเกตผลผ่านหน้าจอ VTube Studio โดยตรง
 
-## หมายเหตุเกี่ยวกับ RVC
-- ฟีเจอร์ตัวอย่างเสียงและสคริปต์ทดสอบถูกถอดออกเพื่อความสะอาดของโปรเจกต์
-- โปรเจกต์ยังรองรับ RVC ผ่านการตั้งค่าใน `.env`: `ENABLE_RVC` และ `VOICE_PRESET`
-- การใช้งานจริงจะถูกเรียกผ่าน workflow หลักใน `src/main.py` เมื่อ TTS สร้างเสียงสำเร็จ
+## หมายเหตุการล้างไฟล์เก่า
+- โค้ด/สคริปต์ที่เกี่ยวกับ RVC และ whisper.cpp ถูกลบออกจากโปรเจกต์เพื่อความเรียบง่าย
+- หากต้องการกลับไปใช้ whisper.cpp หรือ RVC สามารถดู commit เดิมใน Git history

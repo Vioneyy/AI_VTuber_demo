@@ -9,10 +9,7 @@ aiohttp==3.9.5
 # Voice receive extension: pin to latest AEAD-supported build
 discord-ext-voice-recv @ git+https://github.com/imayhaveborkedit/discord-ext-voice-recv.git@0.5.3a180
 
-# AI/ML - Fixed versions to prevent conflicts
-torch==2.1.0
-torchaudio==2.1.0
-torchvision==0.16.0
+# AI/ML (remove heavy Torch stack; not needed for Edge-TTS/Faster-Whisper)
 
 # Numpy - FIX: Use compatible version
 numpy==1.24.3
@@ -25,12 +22,10 @@ pydub==0.25.1
 scipy==1.11.4
 
 # TTS/STT
-# f5-tts-th - จะติดตั้งแยก
-openai-whisper==20231117
+edge-tts==6.1.12
+faster-whisper==0.10.0
 
-# RVC
-faiss-cpu==1.7.4
-praat-parselmouth==0.4.3
+# RVC (removed)
 
 # OpenAI
 openai==1.3.0

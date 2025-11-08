@@ -85,6 +85,7 @@ class RVCConfig:
     enabled: bool = os.getenv("ENABLE_RVC", "true").lower() == "true"
     model_path: str = "rvc_models/jeed_anime.pth"
     index_path: str = "rvc_models/jeed_anime.index"
+    server_url: str = os.getenv("RVC_SERVER_URL", "http://localhost:7860/api/convert")
     voice_preset: str = os.getenv("VOICE_PRESET", "anime_girl")
     pitch: int = 12
     filter_radius: int = 3
@@ -247,6 +248,12 @@ class Config:
         # Warning checks
         if not Path(self.tts.reference_wav).exists():
             warnings.append(f"⚠️ ไม่พบไฟล์เสียงอ้างอิง: {self.tts.reference_wav}")
+        # RVC model check (optional)
+        if self.rvc.enabled:
+            if not Path(self.rvc.model_path).exists():
+                warnings.append(f"⚠️ ไม่พบโมเดล RVC: {self.rvc.model_path}")
+            if not self.rvc.server_url:
+                warnings.append("⚠️ ไม่ตั้งค่า RVC_SERVER_URL (จะไม่สามารถแปลงผ่าน RVC ได้)")
             
         if self.rvc.enabled and not Path(self.rvc.model_path).exists():
             warnings.append(f"⚠️ ไม่พบโมเดล RVC: {self.rvc.model_path}")

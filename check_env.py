@@ -111,45 +111,48 @@ def main():
     check_optional('LLM_TEMPERATURE', os.getenv('LLM_TEMPERATURE', ''), '0.7')
     
     # =================================
-    # 4. TTS Configuration
+    # 4. TTS Configuration (Edge-TTS)
     # =================================
-    print_section("TTS Configuration")
+    print_section("TTS Configuration (Edge-TTS)")
     
-    tts_device = os.getenv('TTS_DEVICE', 'cpu')
-    check_optional('TTS_DEVICE', tts_device, 'cpu')
+    # Edge-TTS ไม่ต้องใช้ CUDA/Torch จึงไม่มีการเช็คอุปกรณ์
+    voice = os.getenv('EDGE_TTS_VOICE', '')
+    if not voice:
+        print("⚠️  EDGE_TTS_VOICE: ไม่ตั้งค่า (จะใช้เสียงดีฟอลต์)")
+        print("   ตัวอย่างเสียงไทย: th-TH-PremwadeeNeural, th-TH-NiwatNeural")
+    else:
+        print(f"✅ EDGE_TTS_VOICE: {voice}")
     
-    if tts_device == 'cuda':
-        print("\n💡 คุณใช้ CUDA - ตรวจสอบว่าติดตั้ง CUDA-enabled PyTorch แล้ว")
+    # ไม่ต้องใช้ไฟล์อ้างอิงเสียงหรือข้อความอ้างอิงสำหรับ Edge-TTS
     
-    ref_audio = os.getenv('F5_TTS_REF_AUDIO', 'reference_audio/jeed_voice.wav')
-    if not check_file_exists('F5_TTS_REF_AUDIO', ref_audio):
-        warnings.append('Reference audio not found')
-        print("\n💡 สร้างโฟลเดอร์และวางไฟล์:")
-        print(f"   mkdir -p {Path(ref_audio).parent}")
-        print(f"   # วางไฟล์เสียงที่ {ref_audio}")
-    
-    check_optional('F5_TTS_REF_TEXT', os.getenv('F5_TTS_REF_TEXT', ''), 'สวัสดีค่ะ')
+    # (ลบ) RVC Configuration – ไม่ใช้แล้ว
     
     # =================================
-    # 5. RVC Configuration
+    # 5. STT Configuration (Faster-Whisper)
     # =================================
-    print_section("RVC Configuration")
+    print_section("STT Configuration (Faster-Whisper)")
     
-    rvc_model = os.getenv('RVC_MODEL_PATH', 'rvc_models/jeed_anime.pth')
-    if not check_file_exists('RVC_MODEL_PATH', rvc_model):
-        warnings.append('RVC model not found (optional)')
-    
-    check_optional('RVC_DEVICE', os.getenv('RVC_DEVICE', ''), 'cpu')
-    check_optional('RVC_PITCH', os.getenv('RVC_PITCH', ''), '0')
-    
-    # =================================
-    # 6. Whisper STT Configuration
-    # =================================
-    print_section("Whisper STT Configuration")
-    
+    # ใช้ตัวแปรเดิมสำหรับความเข้ากันได้
     check_optional('WHISPER_MODEL', os.getenv('WHISPER_MODEL', ''), 'base')
     check_optional('WHISPER_DEVICE', os.getenv('WHISPER_DEVICE', ''), 'cpu')
     check_optional('WHISPER_LANG', os.getenv('WHISPER_LANG', ''), 'th')
+
+    # =================================
+    # 6. RVC Configuration (optional)
+    # =================================
+    print_section("RVC Configuration (optional)")
+    rvc_enabled = os.getenv('ENABLE_RVC', 'false').lower() == 'true'
+    if rvc_enabled:
+        print("✅ ENABLE_RVC: เปิดใช้งาน")
+        rvc_model = os.getenv('RVC_MODEL_PATH', 'rvc_models/jeed_anime.pth')
+        check_file_exists('RVC_MODEL_PATH', rvc_model)
+        rvc_server = os.getenv('RVC_SERVER_URL', '')
+        if rvc_server:
+            print(f"✅ RVC_SERVER_URL: {rvc_server}")
+        else:
+            print("⚠️  RVC_SERVER_URL: ว่าง (จะไม่สามารถแปลงผ่าน RVC ได้)")
+    else:
+        print("ℹ️ ENABLE_RVC: ปิดใช้งาน")
     
     # =================================
     # 7. VTube Studio Configuration

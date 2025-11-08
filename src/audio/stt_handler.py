@@ -1,5 +1,5 @@
 """
-STT Handler - แก้ไข Tensor Error และป้องกันโมเดลนิ่ง
+STT Handler (Faster-Whisper) - เน้นเสถียรและเร็ว
 """
 import numpy as np
 import torch
@@ -26,7 +26,7 @@ class STTHandler:
     แก้ไขปัญหา:
     1. Tensor dimension mismatch (size a != size b)
     2. โมเดลนิ่งเมื่อ error
-    3. Fallback ระหว่าง whisper.cpp และ Python Whisper
+    3. ใช้ Faster-Whisper (CTranslate2) เพื่อความเร็วและเสถียร
     """
     
     def __init__(
@@ -43,9 +43,6 @@ class STTHandler:
             model_name: Whisper model (tiny/base/small/medium/large)
             device: Device (cpu/cuda)
             language: Language (th/en/auto)
-            use_cpp: ใช้ whisper.cpp หรือไม่
-            cpp_binary_path: Path ไปยัง whisper.cpp binary
-            cpp_model_path: Path ไปยัง whisper.cpp model
         """
         self.model_name = model_name
         self.device = device
@@ -90,79 +87,25 @@ class STTHandler:
             logger.warning("CUDA not available, using CPU")
             self.device = "cpu"
         
-        # Whisper.cpp
-        self.use_cpp = use_cpp
-        self.cpp_available = False
-        
-        if use_cpp:
-            self.cpp_available = self._check_cpp_available(
-                cpp_binary_path,
-                cpp_model_path
-            )
-            if self.cpp_available:
-                self.cpp_binary_path = Path(cpp_binary_path)
-                self.cpp_model_path = Path(cpp_model_path)
-                logger.info(f"✅ ใช้ Whisper.cpp: {cpp_binary_path}")
-            else:
-                logger.warning(f"⚠️ ไม่พบ Whisper.cpp: {cpp_binary_path}")
-                logger.info("🔁 ใช้ Python Whisper fallback")
-        
-        # Load Python Whisper
-        self.model = None
-        if not self.cpp_available:
-            self.model = self._load_python_whisper()
+        # โหลด Faster-Whisper
+        self.model = self._load_faster_whisper()
         
         # Stats
         self.total_transcriptions = 0
         self.failed_transcriptions = 0
     
-    def _check_cpp_available(
-        self,
-        binary_path: Optional[str],
-        model_path: Optional[str]
-    ) -> bool:
-        """ตรวจสอบ whisper.cpp"""
-        try:
-            if not binary_path or not model_path:
-                return False
-            
-            binary = Path(binary_path)
-            model = Path(model_path)
-            
-            if not binary.exists():
-                logger.debug(f"Binary not found: {binary}")
-                return False
-            
-            if not model.exists():
-                logger.debug(f"Model not found: {model}")
-                return False
-            
-            # Test run
-            result = subprocess.run(
-                [str(binary), "--help"],
-                capture_output=True,
-                timeout=5
-            )
-            
-            return result.returncode == 0
-            
-        except Exception as e:
-            logger.debug(f"Whisper.cpp check failed: {e}")
-            return False
+    # หมายเหตุ: ยกเลิกการรองรับ whisper.cpp ใน Handler นี้
     
-    def _load_python_whisper(self):
-        """โหลด Python Whisper"""
+    def _load_faster_whisper(self):
+        """โหลด Faster-Whisper"""
         try:
-            import whisper
-            
-            logger.info(f"⬇️ กำลังโหลดโมเดล Python Whisper: {self.model_name} ({self.device})")
-            model = whisper.load_model(self.model_name, device=self.device)
-            logger.info("✅ Python Whisper พร้อมใช้งาน")
-            
+            from faster_whisper import WhisperModel
+            logger.info(f"⬇️ กำลังโหลดโมเดล Faster-Whisper: {self.model_name} ({self.device})")
+            model = WhisperModel(self.model_name, device=self.device)
+            logger.info("✅ Faster-Whisper พร้อมใช้งาน")
             return model
-            
         except Exception as e:
-            logger.error(f"❌ โหลด Python Whisper ล้มเหลว: {e}", exc_info=True)
+            logger.error(f"❌ โหลด Faster-Whisper ล้มเหลว: {e}", exc_info=True)
             raise
     
     async def transcribe(
@@ -197,17 +140,9 @@ class STTHandler:
                 self.failed_transcriptions += 1
                 return None
             
-            # 3. Transcribe
-            if self.cpp_available:
-                logger.debug("🔁 ใช้ Whisper.cpp")
-                text = await self._transcribe_cpp(audio_np)
-                if text:
-                    return text
-                logger.warning("⚠️ Whisper.cpp ล้มเหลว, ใช้ Python Whisper")
-            
-            # Fallback to Python Whisper
-            logger.debug("🔁 ใช้ Python Whisper fallback (ไม่พบ Whisper.cpp)")
-            text = await self._transcribe_python(audio_np)
+            # 3. Transcribe ด้วย Faster-Whisper
+            logger.debug("🔁 ใช้ Faster-Whisper")
+            text = await self._transcribe_faster_whisper(audio_np)
             
             return text
             
@@ -437,39 +372,29 @@ class STTHandler:
             logger.error(f"Validation error: {e}")
             return False
     
-    async def _transcribe_python(self, audio: np.ndarray) -> Optional[str]:
-        """
-        Transcribe ด้วย Python Whisper
-        มี retry logic เพื่อแก้ tensor errors
-        """
+    async def _transcribe_faster_whisper(self, audio: np.ndarray) -> Optional[str]:
+        """Transcribe ด้วย Faster-Whisper"""
         if self.model is None:
-            logger.error("Python Whisper model not loaded")
+            logger.error("Faster-Whisper model not loaded")
             return None
-        
         try:
-            # ลอง transcribe (อาจเกิด tensor error)
-            loop = asyncio.get_event_loop()
-            
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    self._transcribe_with_retry,
-                    audio
-                ),
-                timeout=self.timeout_seconds
-            )
-            
-            if result:
-                text = result['text'].strip()
+            # เขียนเป็นไฟล์ชั่วคราวแล้วให้โมเดลอ่าน
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                temp_path = Path(f.name)
+            sf.write(str(temp_path), audio, 16000, subtype='PCM_16')
+            try:
+                from faster_whisper import WhisperModel
+                segments, info = self.model.transcribe(str(temp_path), language=(self.language if self.language != 'auto' else None))
+                text = "".join([seg.text for seg in segments]).strip()
                 if text:
                     logger.info(f"✅ Transcribed: {text}")
                     return text
-            
-            logger.warning("⚠️ Empty transcription")
-            return None
-            
+                logger.warning("⚠️ Empty transcription")
+                return None
+            finally:
+                temp_path.unlink(missing_ok=True)
         except Exception as e:
-            logger.error(f"❌ Python Whisper error: {e}", exc_info=True)
+            logger.error(f"❌ Faster-Whisper error: {e}", exc_info=True)
             return None
     
     def _transcribe_with_retry(self, audio: np.ndarray) -> Optional[dict]:
@@ -524,56 +449,7 @@ class STTHandler:
         
         return None
     
-    async def _transcribe_cpp(self, audio: np.ndarray) -> Optional[str]:
-        """Transcribe ด้วย whisper.cpp"""
-        try:
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                temp_path = Path(f.name)
-            
-            # Save audio
-            sf.write(str(temp_path), audio, 16000, subtype='PCM_16')
-            
-            # Run whisper.cpp
-            cmd = [
-                str(self.cpp_binary_path),
-                '-m', str(self.cpp_model_path),
-                '-f', str(temp_path),
-                '-l', self.language,
-                '--output-txt',
-                '--no-timestamps',
-                # เพิ่ม threads และ beam size เพื่อความเร็ว/เสถียร
-                '-t', str(max(1, min(8, (os.cpu_count() or 1)))),
-                '-bs', '5'
-            ]
-            
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_seconds
-                )
-            )
-            
-            # Clean up
-            temp_path.unlink(missing_ok=True)
-            
-            if result.returncode == 0:
-                text = result.stdout.strip()
-                if text:
-                    logger.info(f"✅ Transcribed (cpp): {text}")
-                    return text
-            else:
-                logger.error(f"whisper.cpp error: {result.stderr}")
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"whisper.cpp transcription failed: {e}")
-            return None
+    # หมายเหตุ: ยกเลิกเมธอด whisper.cpp ในเวอร์ชันนี้
     
     def get_stats(self) -> dict:
         """ดูสถิติ"""
@@ -600,9 +476,7 @@ def _create_global_stt_handler() -> STTHandler:
     model_name = "tiny"
     device = "cpu"
     language = "th"
-    use_cpp = False
-    cpp_bin = None
-    cpp_model = None
+    # whisper.cpp ไม่รองรับใน Handler นี้
 
     # ใช้ค่าในไฟล์ .env ผ่าน Config หากมี
     try:
@@ -610,9 +484,7 @@ def _create_global_stt_handler() -> STTHandler:
             model_name = getattr(AppConfig, 'WHISPER_MODEL', model_name)
             device = getattr(AppConfig, 'WHISPER_DEVICE', device)
             language = getattr(AppConfig, 'WHISPER_LANG', language)
-            use_cpp = bool(getattr(AppConfig, 'WHISPER_CPP_ENABLED', False))
-            cpp_bin = getattr(AppConfig, 'WHISPER_CPP_BIN_PATH', None)
-            cpp_model = getattr(AppConfig, 'WHISPER_CPP_MODEL_PATH', None)
+            pass
     except Exception:
         # หากอ่านค่าไม่ได้ ให้ใช้ดีฟอลต์
         pass
@@ -621,9 +493,7 @@ def _create_global_stt_handler() -> STTHandler:
         model_name=model_name,
         device=device,
         language=language,
-        use_cpp=use_cpp,
-        cpp_binary_path=cpp_bin,
-        cpp_model_path=cpp_model,
+        # ไม่ส่งพารามิเตอร์ whisper.cpp
     )
 
 
