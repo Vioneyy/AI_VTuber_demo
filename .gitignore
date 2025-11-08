@@ -16,6 +16,7 @@ env/
 
 # Environment variables
 .env
+.env.backup
 
 # Large models and binaries (skip huge files; use LFS if needed)
 models/*.bin
@@ -31,6 +32,7 @@ rvc_models/*.index
 # Outputs & logs
 output/
 logs/
+temp/recordings/
 
 # OS/Tooling
 *.log

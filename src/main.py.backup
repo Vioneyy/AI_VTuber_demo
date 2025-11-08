@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
-from audio.hybrid_stt import HybridSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
-from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler  # ใช้ Edge-TTS แทน RVC เพื่อความเร็วและเสียงธรรมชาติ
+from audio.faster_whisper_stt import FasterWhisperSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
+from audio.edge_tts_handler import EdgeTTSHandler  # ใช้ Edge-TTS แทน RVC เพื่อความเร็วและเสียงธรรมชาติ
 from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
 from llm.chatgpt_client import ChatGPTClient
