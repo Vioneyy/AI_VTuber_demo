@@ -18,6 +18,7 @@ from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
 from audio.hybrid_stt import HybridSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
 from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler  # ใช้ Edge-TTS แทน RVC เพื่อความเร็วและเสียงธรรมชาติ
+from audio.edge_tts_handler import EdgeTTSHandler  # ✅ เพิ่มบรรทัดนี้!
 from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
 from llm.chatgpt_client import ChatGPTClient
@@ -98,7 +99,7 @@ class JeedAIVTuber:
         # Initialize TTS Engine (Edge-TTS)
         logger.info("📦 Loading TTS engine (Edge-TTS)...")
         try:
-            self.tts_engine = EdgeTTSHandler()
+            self.tts_engine = EdgeTTSHandler()  # ✅ ตอนนี้มี import แล้ว!
             logger.info("✅ TTS handler loaded")
         except Exception as e:
             logger.warning(f"⚠️  TTS handler failed to load: {e}")

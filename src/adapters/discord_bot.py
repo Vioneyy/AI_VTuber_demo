@@ -42,6 +42,8 @@ class DiscordBotAdapter:
         
         # Callbacks
         self.on_voice_input: Optional[Callable] = None
+        # callback สำหรับคำสั่งข้อความ end-to-end
+        self.on_text_command: Optional[Callable] = None
         
         # Voice state
         self.is_recording = False
@@ -56,6 +58,13 @@ class DiscordBotAdapter:
         
         # Prevent duplicate processing
         self.processing_users = set()  # users currently being processed
+        
+        # สถานะจากระบบภายนอก (VTS/Queue/TTS)
+        self.external_status = {
+            'vts_connected': False,
+            'tts_ready': False,
+            'queue_ready': False
+        }
         
         self._register_events()
         self._register_commands()
@@ -149,6 +158,114 @@ class DiscordBotAdapter:
         async def test(ctx):
             """ทดสอบ"""
             await ctx.send("✅ ระบบทำงานปกติค่ะ!")
+
+        @self.bot.command(name='voice')
+        async def voice(ctx, state: Optional[str] = None):
+            """เปิด/ปิดการรับเสียง: !voice on / !voice off"""
+            try:
+                if not self.voice_client:
+                    await ctx.send("ℹ️ กรุณาใช้ !join เพื่อเข้าห้องเสียงก่อนนะคะ")
+                    return
+
+                if not state:
+                    await ctx.send(f"🎤 สถานะรับเสียงตอนนี้: {'เปิด' if self.is_recording else 'ปิด'} (ใช้ !voice on/off)")
+                    return
+
+                s = state.lower()
+                if s == 'on':
+                    self.is_recording = True
+                    # เริ่มฟังใหม่เพื่อเคลียร์บัฟเฟอร์และตั้ง callback
+                    await self._start_listening()
+                    await ctx.send("🎤 เปิดรับเสียงแล้วค่ะ")
+                elif s == 'off':
+                    self.is_recording = False
+                    await ctx.send("🔇 ปิดรับเสียงแล้วค่ะ")
+                else:
+                    await ctx.send("❌ ใช้: !voice on หรือ !voice off")
+            except Exception as e:
+                logger.error(f"voice command error: {e}")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+        @self.bot.command(name='ask')
+        async def ask(ctx, *, question: Optional[str] = None):
+            """ส่งคำถามแบบ end-to-end: !ask <ข้อความ>"""
+            try:
+                if not question or not question.strip():
+                    await ctx.send("❌ ใช้: !ask <คำถามของคุณ>")
+                    return
+
+                if not self.on_text_command:
+                    await ctx.send("⚠️ ระบบยังไม่พร้อมรับคำถามผ่านข้อความ")
+                    return
+
+                await ctx.send("🧠 รับคำถามแล้ว กำลังคิดคำตอบให้ค่ะ…")
+                # ส่งไปให้ pipeline หลักจัดคิวและสร้างเสียง
+                await self.on_text_command(str(ctx.author.id), question.strip())
+            except Exception as e:
+                logger.error(f"ask command error: {e}")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+        @self.bot.command(name='rvc')
+        async def rvc(ctx, state: Optional[str] = None):
+            """เปิด/ปิด RVC: !rvc on / !rvc off"""
+            try:
+                # จำกัดสิทธิ์เบื้องต้น: เฉพาะ admin_ids หากกำหนดไว้
+                if self.admin_ids and str(ctx.author.id) not in {str(x) for x in self.admin_ids}:
+                    await ctx.send("❌ คุณไม่มีสิทธิ์เปลี่ยนการตั้งค่า RVC")
+                    return
+
+                if not state:
+                    await ctx.send(f"🎵 RVC: {'เปิด' if getattr(config.rvc, 'enabled', False) else 'ปิด'} | โมเดล: {getattr(config.rvc, 'model_path', 'ไม่ตั้งค่า')}")
+                    return
+
+                s = state.lower()
+                if s == 'on':
+                    config.rvc.enabled = True
+                    await ctx.send("🎵 เปิด RVC แล้วค่ะ")
+                elif s == 'off':
+                    config.rvc.enabled = False
+                    await ctx.send("🎵 ปิด RVC แล้วค่ะ (จะใช้เสียง TTS ตรง)")
+                else:
+                    await ctx.send("❌ ใช้: !rvc on หรือ !rvc off")
+            except Exception as e:
+                logger.error(f"rvc command error: {e}")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+        @self.bot.command(name='status')
+        async def status(ctx):
+            """แสดงสถานะระบบโดยย่อ"""
+            try:
+                lines = [
+                    "📊 **สถานะระบบ**",
+                    f"- Discord Voice: {'เชื่อมต่อ' if self.voice_client else 'ไม่ได้เชื่อมต่อ'}",
+                    f"- รับเสียง: {'เปิด' if self.is_recording else 'ปิด'}",
+                    f"- VTS: {'พร้อม' if self.external_status.get('vts_connected') else 'ไม่พร้อม'}",
+                    f"- TTS: {'พร้อม' if self.external_status.get('tts_ready') else 'ไม่พร้อม'}",
+                    f"- Queue: {'พร้อม' if self.external_status.get('queue_ready') else 'ไม่พร้อม'}",
+                    f"- RVC: {'เปิด' if getattr(config.rvc, 'enabled', False) else 'ปิด'}",
+                ]
+                await ctx.send("\n".join(lines))
+            except Exception as e:
+                logger.error(f"status command error: {e}")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+        @self.bot.command(name='help')
+        async def help_cmd(ctx):
+            """แสดงคู่มือคำสั่งสั้น ๆ"""
+            try:
+                cmds = [
+                    "📝 **คำสั่ง Jeed Bot**",
+                    "!join — ให้บอทเข้าห้องเสียง",
+                    "!leave — ให้บอทออกจากห้องเสียง",
+                    "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้",
+                    "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ",
+                    "!rvc on/off — เปิด/ปิดการใช้ RVC",
+                    "!status — ดูสถานะระบบโดยย่อ",
+                ]
+                await ctx.send("\n".join(cmds))
+            except Exception as e:
+                logger.error(f"help command error: {e}")
+                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
     
     async def _start_listening(self):
         """เริ่มฟังเสียง"""
@@ -375,6 +492,25 @@ class DiscordBotAdapter:
             logger.info("👋 Discord Bot stopped")
         except Exception as e:
             logger.error(f"Error stopping bot: {e}")
+
+    def update_external_status(self, vts_connected: bool = False, tts_ready: bool = False, queue_ready: bool = False):
+        """อัปเดตสถานะจากระบบภายนอก (สำหรับ !status)"""
+        try:
+            self.external_status.update({
+                'vts_connected': bool(vts_connected),
+                'tts_ready': bool(tts_ready),
+                'queue_ready': bool(queue_ready),
+            })
+            # ปรับ presence เล็กน้อยตามสถานะ
+            try:
+                status_txt = f"🎤 Voice {'ON' if self.is_recording else 'OFF'} | TTS {'OK' if tts_ready else 'X'} | RVC {'ON' if getattr(config.rvc, 'enabled', False) else 'OFF'}"
+                asyncio.create_task(self.bot.change_presence(
+                    activity=discord.Activity(type=discord.ActivityType.listening, name=status_txt)
+                ))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"update_external_status error: {e}")
 
 
 class NumpyAudioSource(discord.AudioSource):
