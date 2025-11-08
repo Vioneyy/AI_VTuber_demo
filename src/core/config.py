@@ -31,9 +31,23 @@ class STTConfig:
     threads: int = int(os.getenv("WHISPER_CPP_THREADS", "4"))
     n_gpu_layers: int = int(os.getenv("WHISPER_CPP_NGL", "35"))
     timeout_ms: int = int(os.getenv("WHISPER_CPP_TIMEOUT_MS", "5000"))
+    # Decoder tuning
+    beam_size: int = int(os.getenv("WHISPER_CPP_BEAM_SIZE", "5"))
+    best_of: int = int(os.getenv("WHISPER_CPP_BEST_OF", "5"))
+    temperature: float = float(os.getenv("WHISPER_CPP_TEMPERATURE", "0.0"))
+    temperature_inc: float = float(os.getenv("WHISPER_CPP_TEMPERATURE_INC", "0.2"))
+    no_speech_thold: float = float(os.getenv("WHISPER_CPP_NO_SPEECH_THOLD", "0.6"))
     
     # Processing settings
     use_vad: bool = True
+    # Whisper.cpp VAD parameters (effective only when use_vad=True)
+    vad_model_path: Optional[str] = os.getenv("WHISPER_CPP_VAD_MODEL", "")
+    vad_threshold: float = float(os.getenv("WHISPER_CPP_VAD_THOLD", "0.5"))
+    vad_min_speech_duration_ms: int = int(os.getenv("WHISPER_CPP_VAD_MIN_SPEECH_MS", "300"))
+    vad_min_silence_duration_ms: int = int(os.getenv("WHISPER_CPP_VAD_MIN_SILENCE_MS", "200"))
+    vad_max_speech_duration_s: float = float(os.getenv("WHISPER_CPP_VAD_MAX_SPEECH_S", "600.0"))
+    vad_speech_pad_ms: int = int(os.getenv("WHISPER_CPP_VAD_SPEECH_PAD_MS", "30"))
+    vad_samples_overlap: float = float(os.getenv("WHISPER_CPP_VAD_SAMPLES_OVERLAP", "0.1"))
     question_delay: float = 2.5
     min_audio_length: float = 0.5
     sample_rate: int = 16000
@@ -54,7 +68,8 @@ class TTSConfig:
     """การตั้งค่า Text-to-Speech"""
     engine: str = os.getenv("TTS_ENGINE", "f5_tts_thai")
     reference_wav: str = os.getenv("TTS_REFERENCE_WAV", "reference_audio/jeed_voice.wav")
-    sample_rate: int = 24000
+    # ใช้ค่าใน .env หากตั้งไว้ ไม่เช่นนั้นตั้งเป็น 48000 เพื่อให้ตรงกับ Discord
+    sample_rate: int = int(os.getenv("TTS_SAMPLE_RATE", "48000"))
     speed: float = 0.95
     use_gpu: bool = True
     noise_reduction: bool = True
@@ -105,10 +120,23 @@ class DiscordConfig:
     stt_enabled: bool = os.getenv("DISCORD_VOICE_STT_ENABLED", "true").lower() == "true"
     audio_bitrate: int = 128000
     voice_timeout: int = 300
-    
+    # Voice reception tuning
+    voice_silence_threshold: float = float(os.getenv("DISCORD_VOICE_SILENCE_THRESHOLD", "0.7"))
+    voice_min_audio_duration: float = float(os.getenv("DISCORD_VOICE_MIN_AUDIO_DURATION", "0.35"))
+    # Test mode: reply with fixed TTS text upon any voice input
+    voice_test_reply_text: Optional[str] = os.getenv("DISCORD_VOICE_TEST_REPLY_TEXT", "")
+
     # Recording settings
     default_record_duration: int = 5
     max_record_duration: int = 30
+    voice_record_enabled: bool = os.getenv("DISCORD_VOICE_RECORD_ENABLED", "true").lower() == "true"
+    voice_record_dir: str = os.getenv("DISCORD_VOICE_RECORD_DIR", "temp/recordings/discord_in")
+    # Recording bot playback (outgoing TTS to Discord)
+    voice_playback_record_enabled: bool = os.getenv("DISCORD_PLAYBACK_RECORD_ENABLED", "true").lower() == "true"
+    voice_playback_record_dir: str = os.getenv("DISCORD_PLAYBACK_RECORD_DIR", "temp/recordings/discord_out")
+    # Debug: save pre/post processed playback audio and log stats
+    voice_playback_debug_enabled: bool = os.getenv("DISCORD_PLAYBACK_DEBUG_ENABLED", "false").lower() == "true"
+    voice_playback_debug_dir: str = os.getenv("DISCORD_PLAYBACK_DEBUG_DIR", "temp/recordings/discord_out")
 
 @dataclass
 class YouTubeConfig:
@@ -310,6 +338,43 @@ class Config:
     def AUDIO_DEVICE(self) -> str:
         # Simple mapping: use_gpu → 'cuda', else 'cpu'
         return 'cuda' if self.system.use_gpu else 'cpu'
+
+    # ===== Compatibility: device selection from .env =====
+    @property
+    def TTS_DEVICE(self) -> str:
+        """Device for TTS engine. Falls back to GPU flag if not set."""
+        # Prefer explicit .env override; else map from use_gpu
+        return os.getenv("TTS_DEVICE", 'cuda' if self.system.use_gpu else 'cpu')
+
+    @property
+    def RVC_DEVICE(self) -> str:
+        """Device for RVC conversion. Falls back to GPU flag if not set."""
+        return os.getenv("RVC_DEVICE", 'cuda' if self.system.use_gpu else 'cpu')
+
+    # ===== Additional compatibility for STT/Python Whisper and admin/queue =====
+    @property
+    def WHISPER_MODEL(self) -> str:
+        return os.getenv("WHISPER_MODEL", "base")
+
+    @property
+    def WHISPER_DEVICE(self) -> str:
+        return os.getenv("WHISPER_DEVICE", "cpu")
+
+    @property
+    def WHISPER_LANG(self) -> str:
+        return os.getenv("WHISPER_LANG", "th")
+
+    @property
+    def WHISPER_CPP_ENABLED(self) -> bool:
+        return os.getenv("WHISPER_CPP_ENABLED", "false").lower() == "true"
+
+    @property
+    def ADMIN_USER_IDS(self) -> set:
+        return set([u.strip() for u in os.getenv("ADMIN_USER_IDS", "").split(",") if u.strip()])
+
+    @property
+    def QUEUE_MAX_SIZE(self) -> int:
+        return int(self.system.max_queue_size)
 
     @property
     def WHISPER_CPP_BIN_PATH(self) -> str:

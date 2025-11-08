@@ -28,7 +28,7 @@ class LLMHandler:
         self.total_tokens = 0
         self.avg_response_time = 0
         
-    async def generate_response(self, user_message: str, retry: int = 2) -> Optional[str]:
+    async def generate_response(self, user_message: str, retry: int = 2, system_prompt: Optional[str] = None) -> Optional[str]:
         """
         สร้างคำตอบจาก LLM
         Args:
@@ -52,8 +52,9 @@ class LLMHandler:
             
             # สร้าง messages (จำกัดประวัติให้สั้นลง)
             hist = self.conversation_history[-self.max_history:]
+            sprompt = system_prompt or JeedPersona.SYSTEM_PROMPT
             messages = [
-                {"role": "system", "content": JeedPersona.SYSTEM_PROMPT}
+                {"role": "system", "content": sprompt}
             ] + hist
 
             # กำหนด max_tokens แบบไดนามิกตามความยาวคำถาม

@@ -12,8 +12,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 class F5TTSThai:
-    def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, device: str | None = None):
+        # Device selection from .env or override; fallback to CUDA if available
+        env_device = os.getenv("TTS_DEVICE")
+        if device:
+            self.device = device
+        elif env_device:
+            self.device = env_device
+        else:
+            # Map from global GPU preference when available
+            try:
+                from core.config import config as _cfg
+                self.device = 'cuda' if _cfg.system.use_gpu else 'cpu'
+            except Exception:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Safety: if CUDA requested but unavailable, fall back to CPU
+        if self.device.startswith('cuda') and not torch.cuda.is_available():
+            logger.warning("CUDA requested for F5-TTS but not available. Falling back to CPU.")
+            self.device = 'cpu'
+
         self.use_reference = os.getenv("F5_TTS_USE_REFERENCE", "false").lower() == "true"
         # ค่าเริ่มต้นพาธไฟล์อ้างอิงเสียงชี้ไปยังไฟล์ในโปรเจ็กต์โดยตรง
         self.ref_audio_path = os.getenv("TTS_REFERENCE_WAV", r"d:\AI_VTuber_demo\ref_audio.wav")
@@ -32,6 +50,7 @@ class F5TTSThai:
             logger.info("📦 กำลังโหลด F5-TTS-Thai model...")
             
             # โหลด model ด้วย TTS class
+            # Note: F5 TTS-TH selects GPU automatically if available; we log chosen device.
             self.tts = TTS(model="v1")  # ใช้ model v1 ตาม Hugging Face
             
             logger.info("✅ F5-TTS-Thai โหลดสำเร็จ!")

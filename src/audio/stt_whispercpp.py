@@ -40,6 +40,26 @@ class WhisperCppSTT:
                     exe = p
                     break
         args = [str(exe), "-m", str(self.model_path), "-f", str(wav_path), "-l", self.lang, "-nt"]
+        # Decoder tuning
+        if config.stt.beam_size and config.stt.beam_size > 0:
+            args += ["-bs", str(config.stt.beam_size)]
+        if config.stt.best_of and config.stt.best_of > 0:
+            args += ["-bo", str(config.stt.best_of)]
+        args += ["-tp", str(config.stt.temperature)]
+        args += ["-tpi", str(config.stt.temperature_inc)]
+        args += ["-nth", str(config.stt.no_speech_thold)]
+
+        # Enable VAD inside whisper.cpp to auto-trim segments
+        if config.stt.use_vad:
+            args += ["--vad"]
+            if config.stt.vad_model_path:
+                args += ["-vm", str(config.stt.vad_model_path)]
+            args += ["-vt", str(config.stt.vad_threshold)]
+            args += ["-vspd", str(config.stt.vad_min_speech_duration_ms)]
+            args += ["-vsd", str(config.stt.vad_min_silence_duration_ms)]
+            args += ["-vmsd", str(config.stt.vad_max_speech_duration_s)]
+            args += ["-vp", str(config.stt.vad_speech_pad_ms)]
+            args += ["-vo", str(config.stt.vad_samples_overlap)]
         if self.threads and self.threads > 0:
             args += ["-t", str(self.threads)]
         if self.n_gpu_layers and self.n_gpu_layers > 0:

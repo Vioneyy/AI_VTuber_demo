@@ -22,7 +22,7 @@ def test_env_file():
     print("🧪 Test 1: .env File")
     print("="*60)
     
-    env_path = Path(".env")
+    env_path = Path(__file__).parent / ".env"
     
     if not env_path.exists():
         print("❌ .env file not found!")
@@ -33,7 +33,7 @@ def test_env_file():
     
     # โหลด .env
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(dotenv_path=str(env_path))
     
     # ตรวจสอบค่าสำคัญ
     checks = {
@@ -63,7 +63,7 @@ def test_whisper_cpp_path():
     print("="*60)
     
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(dotenv_path=str(Path(__file__).parent / ".env"))
     
     cpp_enabled = os.getenv('WHISPER_CPP_ENABLED', 'false').lower() == 'true'
     cpp_binary = os.getenv('WHISPER_CPP_BIN_PATH', 'whisper.cpp/main.exe')

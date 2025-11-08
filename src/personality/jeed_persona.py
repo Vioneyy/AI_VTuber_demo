@@ -58,6 +58,15 @@ class JeedPersona:
 
 จำไว้: **เป็นจื้ดที่น่ารักและจริงใจเสมอ!**"""
 
+    # --- Interface methods for ResponseGenerator ---
+    def get_system_prompt(self) -> str:
+        """คืนค่า system prompt สำหรับ LLM"""
+        return self.SYSTEM_PROMPT
+
+    def get_current_personality(self) -> str:
+        """คืนชื่อบุคลิกภาพปัจจุบัน (สำหรับ safety/message templates)"""
+        return "jeed"
+
     # Emotion keywords สำหรับวิเคราะห์อารมณ์
     EMOTION_KEYWORDS = {
         Emotion.HAPPY: ["ดี", "สนุก", "ชอบ", "รัก", "ยินดี", "ดีใจ", "อิอิ", "เย้", "ว้าว"],

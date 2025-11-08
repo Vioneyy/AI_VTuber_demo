@@ -16,9 +16,17 @@ import numpy as np
 
 class F5TTSThai:
     def __init__(self, device: str | None = None, reference_wav: str | None = None):
-        # device ไม่ได้ใช้โดยตรงใน engine จริง แต่รับไว้เพื่อความเข้ากันได้
+        # รับ device เพื่อส่งต่อไปยัง engine จริง (อ่านจาก .env หากไม่ระบุ)
         try:
-            self.engine = _RealF5TTSThai()
+            # หากไม่ได้ระบุ ให้ใช้ค่าใน .env หรือ map จาก core.config
+            if device is None:
+                try:
+                    from core.config import config as _cfg
+                    device = os.getenv("TTS_DEVICE", 'cuda' if _cfg.system.use_gpu else 'cpu')
+                except Exception:
+                    device = os.getenv("TTS_DEVICE", None)
+
+            self.engine = _RealF5TTSThai(device=device)
         except Exception as e:
             logger.error(f"❌ โหลด F5-TTS-Thai ไม่สำเร็จ: {e}. ใช้ fallback แบบเงียบแทน")
             self.engine = self._fallback_engine()
@@ -81,7 +89,14 @@ def create_tts_engine(engine_type: str | None = None):
 
     try:
         logger.info("✅ ใช้ F5-TTS-Thai")
-        return F5TTSThai()
+        # ส่งต่อ device ที่อ่านจาก .env ผ่าน core.config
+        try:
+            from core.config import config as _cfg
+            desired_device = os.getenv("TTS_DEVICE", 'cuda' if _cfg.system.use_gpu else 'cpu')
+        except Exception:
+            desired_device = os.getenv("TTS_DEVICE", None)
+
+        return F5TTSThai(device=desired_device)
     except ImportError as e:
         logger.error(f"❌ ไม่สามารถโหลด F5-TTS-Thai: {e}")
         logger.error("ติดตั้งด้วย: pip install f5-tts-th")

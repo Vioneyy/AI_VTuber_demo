@@ -35,6 +35,10 @@ class ChatGPTClient:
         """
         return await self._handler.generate_response(text)
 
+    async def generate(self, text: str, system_prompt: Optional[str] = None) -> str:
+        """ให้เข้ากับ ResponseGenerator โดยรองรับ system_prompt แบบ optional"""
+        return await self._handler.generate_response(text, system_prompt=system_prompt)
+
     def clear_history(self):
         self._handler.clear_history()
 

@@ -37,12 +37,25 @@ class TTSRVCHandler:
     def _load_tts_model(self):
         """โหลดโมเดล F5-TTS"""
         try:
-            # TODO: โหลดโมเดล F5-TTS จริง
-            # ตอนนี้เป็น placeholder
-            print("📦 Loading F5-TTS model...")
-            # from f5_tts import F5TTS
-            # self.tts_model = F5TTS(...)
-            print("✅ F5-TTS loaded")
+            print("📦 Loading F5-TTS-Thai engine...")
+            # ใช้ wrapper ที่มี fallback เงียบถ้าโหลดไม่สำเร็จ
+            from adapters.tts.f5_tts_thai import F5TTSThai
+            # sync env/sample rate ให้ engine
+            try:
+                os.environ["F5_TTS_SAMPLE_RATE"] = str(config.tts.sample_rate)
+            except Exception:
+                pass
+            # ส่งพาธ reference จาก config หากมี (ถ้าไม่มี ใช้ None)
+            ref_wav = getattr(config.tts, 'reference_wav', None)
+            # อ่านค่า device จาก .env/core.config
+            desired_device = None
+            try:
+                desired_device = config.TTS_DEVICE
+            except Exception:
+                desired_device = os.getenv("TTS_DEVICE", None)
+
+            self.tts_model = F5TTSThai(device=desired_device, reference_wav=ref_wav)
+            print("✅ F5-TTS-Thai ready")
         except Exception as e:
             print(f"⚠️ Failed to load F5-TTS: {e}")
             self.tts_model = None
@@ -128,22 +141,39 @@ class TTSRVCHandler:
     async def _run_tts(self, text: str) -> Optional[np.ndarray]:
         """รัน F5-TTS"""
         try:
-            # TODO: รันโมเดล F5-TTS จริง
-            # สำหรับตอนนี้ใช้ placeholder
-            
-            # ประมาณเวลาพูด
-            word_count = JeedPersona.count_words(text)
-            duration = word_count * 0.35 / config.tts.speed
-            
-            # สร้างเสียงจำลอง (sine wave)
-            sample_rate = config.tts.sample_rate
-            samples = int(duration * sample_rate)
-            t = np.linspace(0, duration, samples)
-            audio = np.sin(2 * np.pi * 440 * t) * 0.3  # 440 Hz
-            
-            print(f"🎵 TTS generated: {duration:.2f}s, {samples} samples")
-            
-            return audio.astype(np.float32)
+            if self.tts_model is None:
+                # fallback: สร้างความเงียบระยะสั้นแทนเพื่อหลีกเลี่ยงเสียงแตก
+                duration = max(0.6, JeedPersona.count_words(text) * 0.35 / config.tts.speed)
+                samples = int(duration * config.tts.sample_rate)
+                return np.zeros(samples, dtype=np.float32)
+
+            # สังเคราะห์เสียงเป็น WAV bytes
+            wav_bytes = await self.tts_model.generate(text)
+
+            # อ่าน WAV bytes เป็น numpy float32
+            from io import BytesIO
+            import soundfile as sf
+            data, sr = sf.read(BytesIO(wav_bytes), dtype='float32')
+
+            # ถ้าเป็นสเตอริโอ -> แปลงเป็นโมโน
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+
+            # Resample เป็น config.tts.sample_rate หากจำเป็น (ใช้ polyphase คุณภาพดี)
+            target_sr = config.tts.sample_rate
+            if sr != target_sr:
+                try:
+                    from scipy.signal import resample_poly
+                    data = resample_poly(data, target_sr, sr).astype(np.float32)
+                except Exception:
+                    # Fallback: linear interpolation ด้วย numpy
+                    new_len = int(len(data) * target_sr / sr)
+                    x_old = np.linspace(0.0, 1.0, num=len(data), endpoint=False)
+                    x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
+                    data = np.interp(x_new, x_old, data).astype(np.float32)
+
+            print(f"🎵 TTS generated: {len(data)/target_sr:.2f}s, sr={target_sr}")
+            return data.astype(np.float32)
             
         except Exception as e:
             print(f"❌ TTS Error: {e}")

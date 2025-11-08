@@ -7,8 +7,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import sys
 
-# โหลด .env
-load_dotenv()
+# โหลด .env จากพาธโปรเจกต์โดยชัดเจน
+load_dotenv(dotenv_path=str(Path(__file__).parent / ".env"))
 
 def print_section(title):
     """พิมพ์หัวข้อ"""

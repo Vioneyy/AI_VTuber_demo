@@ -13,10 +13,6 @@ from typing import Optional, Callable
 import io
 import time
 import numpy as np
-import wave
-from pathlib import Path
-from datetime import datetime
-from core.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +46,8 @@ class DiscordBotAdapter:
         # Voice activity detection
         self.user_audio_buffers = {}  # user_id -> audio_buffer
         self.user_last_voice = {}  # user_id -> timestamp
-        # ปรับได้ผ่าน .env: DISCORD_VOICE_SILENCE_THRESHOLD, DISCORD_VOICE_MIN_AUDIO_DURATION
-        self.silence_threshold = getattr(config.discord, "voice_silence_threshold", 0.7)
-        self.min_audio_duration = getattr(config.discord, "voice_min_audio_duration", 0.35)
+        self.silence_threshold = 1.0  # วินาที - ถ้าเงียบนานกว่านี้ถือว่าพูดจบ
+        self.min_audio_duration = 0.5  # วินาที - เสียงสั้นเกินไปจะไม่ส่ง
         
         # Prevent duplicate processing
         self.processing_users = set()  # users currently being processed
@@ -61,9 +56,6 @@ class DiscordBotAdapter:
         self._register_commands()
         
         logger.info("✅ Discord Bot initialized")
-        logger.info(
-            f"Discord voice settings: silence_threshold={self.silence_threshold}, min_audio_duration={self.min_audio_duration}"
-        )
     
     def _register_events(self):
         """Register bot events"""
@@ -111,11 +103,10 @@ class DiscordBotAdapter:
                     self.voice_client = None
                     await asyncio.sleep(1)
                 
-                # Connect with VoiceRecvClient to enable voice receiving
+                # Connect
                 self.voice_client = await channel.connect(
                     timeout=10.0,
-                    reconnect=False,
-                    cls=voice_recv.VoiceRecvClient
+                    reconnect=False
                 )
                 
                 logger.info(f"✅ เชื่อมต่อห้อง: {channel.name}")
@@ -162,32 +153,21 @@ class DiscordBotAdapter:
         
         # Create callback sink
         def voice_callback(user, data):
-            """Callback เมื่อได้รับเสียง (เรียกจาก thread ของ voice router)"""
+            """Callback เมื่อได้รับเสียง"""
             if not self.is_recording:
                 return
-
+            
             # Ignore bot
             if user.bot:
                 return
-
-            # Copy PCM bytes to avoid cross-thread object lifetime issues
-            try:
-                audio_bytes = bytes(data.pcm)
-            except Exception:
-                return
-
-            # Schedule coroutine on bot's event loop thread-safely
-            try:
-                self.bot.loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(self._buffer_audio(user, audio_bytes))
-                )
-            except Exception as e:
-                logger.error(f"Error scheduling audio buffer: {e}")
+            
+            # Buffer audio
+            asyncio.create_task(self._buffer_audio(user, data))
         
         # Start recording
         self.voice_client.listen(voice_recv.BasicSink(voice_callback))
     
-    async def _buffer_audio(self, user, audio_bytes: bytes):
+    async def _buffer_audio(self, user, audio_data: voice_recv.VoiceData):
         """
         Buffer audio และตรวจจับว่าผู้ใช้พูดจบแล้วหรือยัง
         """
@@ -203,7 +183,7 @@ class DiscordBotAdapter:
             return  # ข้ามไปเพราะยังไม่เสร็จ
         
         # Append audio
-        self.user_audio_buffers[user_id].extend(audio_bytes)
+        self.user_audio_buffers[user_id].extend(audio_data.pcm)
         self.user_last_voice[user_id] = current_time
         
         # เช็คว่าเงียบนานพอหรือยัง (หมายถึงพูดจบแล้ว)
@@ -231,41 +211,20 @@ class DiscordBotAdapter:
                 return
             
             audio_bytes = bytes(self.user_audio_buffers[user_id])
-
+            
             # เช็คความยาว
-            # Discord voice_recv provides PCM int16 mono @ 48kHz
-            duration = len(audio_bytes) / (48000 * 2)  # 48kHz, mono, int16
-
+            duration = len(audio_bytes) / (48000 * 2 * 2)  # 48kHz, stereo, int16
+            
             if duration < self.min_audio_duration:
                 logger.debug(f"Audio too short: {duration:.2f}s from {user.name}")
                 return
-
+            
             logger.info(f"🎤 Received voice from {user.name}")
-
-            # บันทึกเสียงที่พูดเป็นไฟล์ WAV (mono 16-bit @48kHz)
-            try:
-                if config.discord.voice_record_enabled:
-                    record_dir = Path(config.discord.voice_record_dir)
-                    record_dir.mkdir(parents=True, exist_ok=True)
-
-                    safe_name = ''.join(c for c in user.name if c.isalnum() or c in ('-', '_')) or 'user'
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    out_path = record_dir / f"{safe_name}_{ts}.wav"
-
-                    with wave.open(str(out_path), 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)  # int16
-                        wf.setframerate(48000)
-                        wf.writeframes(audio_bytes)
-
-                    logger.info(f"💾 Saved voice recording: {out_path} ({duration:.2f}s)")
-            except Exception as rec_err:
-                logger.warning(f"⚠️ Failed to save voice recording: {rec_err}")
-
+            
             # Clear buffer
             del self.user_audio_buffers[user_id]
             del self.user_last_voice[user_id]
-
+            
             # Send to callback
             if self.on_voice_input:
                 await self.on_voice_input(user, audio_bytes, 48000)
@@ -282,21 +241,6 @@ class DiscordBotAdapter:
         self.user_audio_buffers.clear()
         self.user_last_voice.clear()
         self.processing_users.clear()
-        logger.debug("🧹 Cleared audio buffers")
-    
-    async def _ensure_single_playback(self):
-        """หยุดการเล่นเดิมให้หมดก่อนเริ่มใหม่ และล้างบัฟเฟอร์"""
-        try:
-            if self.voice_client and self.voice_client.is_playing():
-                logger.debug("🛑 VoiceClient is playing, stopping current audio")
-                self.voice_client.stop()
-                # รอเล็กน้อยเพื่อให้ Opus flush เฟรมที่ค้างอยู่
-                await asyncio.sleep(0.1)
-        except Exception:
-            pass
-        # ล้างบัฟเฟอร์รับเสียงเพื่อหลีกเลี่ยง feedback/queue ทับซ้อน
-        self._clear_audio_buffers()
-
     
     async def play_audio(self, audio_data: np.ndarray, sample_rate: int):
         """เล่นเสียง"""
@@ -305,37 +249,12 @@ class DiscordBotAdapter:
             return
         
         try:
-            # ป้องกันเล่นหลายสตรีมซ้อนกัน และป้องกันฟังเสียงตัวเองระหว่างเล่น
-            # ปิดการบันทึกชั่วคราว
-            prev_recording = self.is_recording
-            self.is_recording = False
-
-            # หยุดการเล่นเดิมให้หมดและล้างบัฟเฟอร์
-            await self._ensure_single_playback()
-
             # แปลง numpy array เป็น audio source
             audio_source = NumpyAudioSource(audio_data, sample_rate)
             
-            # บันทึกเสียงออกจากบอท (PCM16 mono @48kHz) เป็นไฟล์ WAV
-            try:
-                from core.config import config
-                if getattr(config.discord, 'voice_playback_record_enabled', False):
-                    from datetime import datetime
-                    record_dir = Path(getattr(config.discord, 'voice_playback_record_dir', 'temp/recordings/discord_out'))
-                    record_dir.mkdir(parents=True, exist_ok=True)
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    # ใช้ชื่อไฟล์ระบุว่าเป็นบอท
-                    out_path = record_dir / f"bot_{ts}.wav"
-                    # เขียนเป็น WAV 16-bit @48kHz จาก audio_source.audio_bytes
-                    import wave
-                    with wave.open(str(out_path), 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)  # 16-bit
-                        wf.setframerate(48000)
-                        wf.writeframes(audio_source.audio_bytes)
-                    logger.info(f"💾 Saved bot playback: {out_path}")
-            except Exception as rec_e:
-                logger.warning(f"⚠️ Failed to save bot playback: {rec_e}")
+            # รอถ้ากำลังเล่นอยู่
+            while self.voice_client.is_playing():
+                await asyncio.sleep(0.1)
             
             # เล่นเสียง
             self.voice_client.play(audio_source)
@@ -350,9 +269,6 @@ class DiscordBotAdapter:
             
         except Exception as e:
             logger.error(f"Error playing audio: {e}", exc_info=True)
-        finally:
-            # เปิดการฟังเสียงอีกครั้งหลังเล่นเสร็จ
-            self.is_recording = prev_recording
     
     async def start(self):
         """Start bot"""
@@ -386,102 +302,18 @@ class NumpyAudioSource(discord.AudioSource):
             audio_data: Audio data (numpy array, float32)
             sample_rate: Sample rate
         """
-        # Debug stats (before any processing)
-        try:
-            pre_mean = float(np.mean(audio_data))
-            pre_peak = float(np.max(np.abs(audio_data)))
-            pre_rms = float(np.sqrt(np.mean(audio_data**2)))
-            logger.info(f"[Playback] In stats: mean={pre_mean:.6f}, peak={pre_peak:.6f}, rms={pre_rms:.6f}, sr={sample_rate}")
-        except Exception:
-            pass
-
-        # Optional: save raw input for debugging
-        try:
-            from core.config import config as _cfg
-            if getattr(_cfg.discord, 'voice_playback_debug_enabled', False):
-                from datetime import datetime
-                from pathlib import Path as _P
-                import soundfile as _sf
-                dbg_dir = _P(getattr(_cfg.discord, 'voice_playback_debug_dir', 'temp/recordings/discord_out'))
-                dbg_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                _sf.write(str(dbg_dir / f"bot_pre_in_{ts}.wav"), audio_data.astype(np.float32), sample_rate)
-        except Exception as e:
-            logger.debug(f"Debug save (pre-in) failed: {e}")
-
         # Resample to 48kHz (Discord requirement)
         if sample_rate != 48000:
-            try:
-                from scipy.signal import resample_poly
-                audio_data = resample_poly(audio_data, 48000, sample_rate)
-            except Exception:
-                # Fallback: linear interpolation
-                new_len = int(len(audio_data) * 48000 / sample_rate)
-                x_old = np.linspace(0.0, 1.0, num=len(audio_data), endpoint=False)
-                x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
-                audio_data = np.interp(x_new, x_old, audio_data)
+            from scipy import signal
+            audio_data = signal.resample(
+                audio_data,
+                int(len(audio_data) * 48000 / sample_rate)
+            )
         
-        # Remove DC offset
-        try:
-            audio_data = (audio_data - float(np.mean(audio_data))).astype(np.float32)
-        except Exception:
-            pass
-
-        # Gentle low-pass to reduce hiss (~12 kHz)
-        try:
-            from scipy.signal import butter, filtfilt
-            nyq = 0.5 * 48000.0
-            cutoff = 12000.0 / nyq
-            if 0.0 < cutoff < 1.0:
-                b, a = butter(4, cutoff, btype='low')
-                audio_data = filtfilt(b, a, audio_data).astype(np.float32)
-        except Exception:
-            pass
-
-        # Soft limiter to avoid clicks/pops from sudden peaks
-        try:
-            audio_data = (np.tanh(1.2 * audio_data) / np.tanh(1.2)).astype(np.float32)
-        except Exception:
-            pass
-
         # Ensure in range [-1, 1]
         max_val = np.abs(audio_data).max()
         if max_val > 0:
             audio_data = audio_data / max_val * 0.95
-
-        # Debug stats after processing (still float)
-        try:
-            aft_mean = float(np.mean(audio_data))
-            aft_peak = float(np.max(np.abs(audio_data)))
-            aft_rms = float(np.sqrt(np.mean(audio_data**2)))
-            logger.info(f"[Playback] Proc stats: mean={aft_mean:.6f}, peak={aft_peak:.6f}, rms={aft_rms:.6f} @48k")
-        except Exception:
-            pass
-
-        # Optional: save processed float audio at 48k for debugging
-        try:
-            from core.config import config as _cfg
-            if getattr(_cfg.discord, 'voice_playback_debug_enabled', False):
-                from datetime import datetime
-                from pathlib import Path as _P
-                import soundfile as _sf
-                dbg_dir = _P(getattr(_cfg.discord, 'voice_playback_debug_dir', 'temp/recordings/discord_out'))
-                dbg_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                _sf.write(str(dbg_dir / f"bot_post_proc_{ts}.wav"), audio_data.astype(np.float32), 48000)
-        except Exception as e:
-            logger.debug(f"Debug save (post-proc) failed: {e}")
-
-        # Apply short fade in/out to reduce clicks/pops (10ms each)
-        try:
-            fade_samples = int(0.01 * 48000)
-            if fade_samples > 0 and audio_data.size > (2 * fade_samples):
-                ramp_in = np.linspace(0.0, 1.0, fade_samples, endpoint=False, dtype=np.float32)
-                ramp_out = np.linspace(1.0, 0.0, fade_samples, endpoint=False, dtype=np.float32)
-                audio_data[:fade_samples] *= ramp_in
-                audio_data[-fade_samples:] *= ramp_out
-        except Exception as e:
-            logger.debug(f"Fade-in/out failed: {e}")
         
         # Convert to int16
         audio_data = np.clip(audio_data, -1.0, 1.0)
@@ -489,35 +321,6 @@ class NumpyAudioSource(discord.AudioSource):
         
         # Convert to bytes
         self.audio_bytes = audio_data.tobytes()
-
-        # Optional: save final PCM16 stream as WAV (48k) for debugging
-        try:
-            from core.config import config as _cfg
-            if getattr(_cfg.discord, 'voice_playback_debug_enabled', False):
-                from datetime import datetime
-                from pathlib import Path as _P
-                import wave as _wave
-                dbg_dir = _P(getattr(_cfg.discord, 'voice_playback_debug_dir', 'temp/recordings/discord_out'))
-                dbg_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                out_path = dbg_dir / f"bot_final_pcm_{ts}.wav"
-                with _wave.open(str(out_path), 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(48000)
-                    wf.writeframes(self.audio_bytes)
-        except Exception as e:
-            logger.debug(f"Debug save (final-pcm) failed: {e}")
-        
-        # Pad trailing silence to help Opus encoder flush (≈40ms)
-        try:
-            tail_pad_ms = 40
-            pad_samples = int(48000 * (tail_pad_ms / 1000.0))
-            pad_bytes = pad_samples * 2  # int16 mono
-            if pad_bytes > 0:
-                self.audio_bytes += b"\x00" * pad_bytes
-        except Exception as e:
-            logger.debug(f"Tail pad failed: {e}")
         self.position = 0
         
         # Discord expects 20ms frames at 48kHz

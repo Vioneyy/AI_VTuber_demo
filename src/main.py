@@ -8,21 +8,19 @@ import signal
 import sys
 from pathlib import Path
 import io
+import os
+import numpy as np
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import Config
 from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
 from audio.stt_handler import stt_handler  # โหลดครั้งเดียวเพื่อคงโมเดลไว้ในหน่วยความจำ
-
-# Ensure required directories exist before configuring logging
-try:
-    Config.create_directories()
-except Exception:
-    # If directory creation fails, fallback to console-only logging
-    pass
+from core.response_generator import get_response_generator
+from personality.jeed_persona import jeed_persona
+from llm.chatgpt_client import ChatGPTClient
+from core.config import config as core_config
 
 # Setup logging
 # Configure logging with UTF-8 safe console handler
@@ -35,7 +33,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.FileHandler(str(Config.LOGS_DIR / 'ai_vtuber.log'), encoding='utf-8'),
+        logging.FileHandler(str(Path(core_config.system.log_dir) / 'ai_vtuber.log'), encoding='utf-8'),
         logging.StreamHandler(utf8_stdout)
     ]
 )
@@ -47,7 +45,7 @@ class JeedAIVTuber:
     
     def __init__(self):
         """Initialize AI VTuber"""
-        self.config = Config
+        self.config = core_config
         
         # Components
         self.queue_manager: SmartQueueManager = None
@@ -69,19 +67,13 @@ class JeedAIVTuber:
         logger.info("🎮 Jeed AI VTuber Starting...")
         logger.info("=" * 60)
         
-        # Validate config
-        is_valid, errors = self.config.validate()
+        # Validate config (core.config prints details internally)
+        is_valid = self.config.validate()
         if not is_valid:
-            logger.error("❌ Configuration errors:")
-            for error in errors:
-                logger.error(f"  {error}")
-            if any("❌" in e for e in errors):
-                raise ValueError("Critical configuration errors")
+            logger.error("❌ Configuration invalid. Please check your .env settings.")
+            raise ValueError("Critical configuration errors")
         
         logger.info("✅ การตั้งค่าถูกต้องทั้งหมด")
-        
-        # Create directories
-        self.config.create_directories()
         
         # Initialize Queue Manager
         logger.info("📦 Initializing Queue Manager...")
@@ -101,6 +93,21 @@ class JeedAIVTuber:
             logger.warning(f"⚠️  TTS handler failed to load: {e}")
             self.tts_engine = None
             logger.warning("⚠️  Continuing without TTS")
+
+        # Initialize LLM Response Generator
+        logger.info("🧠 Initializing LLM ResponseGenerator...")
+        try:
+            llm_client = ChatGPTClient(
+                api_key=self.config.OPENAI_API_KEY,
+                model=self.config.LLM_MODEL,
+                temperature=self.config.LLM_TEMPERATURE,
+                max_tokens=self.config.LLM_MAX_TOKENS,
+            )
+            self.llm_processor = get_response_generator(llm_client, jeed_persona)
+            logger.info("✅ LLM ResponseGenerator ready")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize LLM ResponseGenerator: {e}")
+            self.llm_processor = None
         
         # Initialize VTube Studio Controller (updated import path)
         logger.info("📡 เชื่อมต่อ VTube Studio...")
@@ -287,69 +294,76 @@ class JeedAIVTuber:
         )
     
     async def _process_queue_item(self, item: QueueItem):
-        """
-        Process queue item
-        
-        This is where the magic happens:
-        1. Get text input (from voice/text)
-        2. Generate response with LLM
-        3. Generate speech with TTS
-        4. Animate VTube Studio model
-        5. Play audio in Discord
-        """
+        """Process queue item: LLM -> TTS -> Discord playback + VTS talking"""
         try:
-            # 1. Get input text (voice already transcribed at enqueue stage)
-            text_input = item.content
-            
-            logger.info(f"💭 Input: {text_input}")
-            
-            # 2. Generate response with LLM (personality-aware)
-            logger.info("🧠 Generating response...")
+            logger.info(f"🧾 Processing item from {item.user_name} ({item.source})")
+
+            # 1) Generate response text via LLM with safety/personality
+            if not self.llm_processor:
+                logger.warning("⚠️ LLM processor not initialized; skipping")
+                return
+
+            response_text, rejection_reason = await self.llm_processor.generate_response(
+                user_message=item.content,
+                user=item.user_name,
+                source=item.source,
+                repeat_question=(item.source == "youtube")
+            )
+
+            if not response_text:
+                logger.info(f"🚫 No response generated (reason: {rejection_reason})")
+                return
+
+            # Test mode: override final response with fixed text (e.g., "สวัสดีนะ")
             try:
-                from llm.llm_handler import llm_handler
-                response_text = await llm_handler.generate_response(text_input)
-            except Exception as e:
-                logger.warning(f"⚠️ LLM generation failed: {e}")
-                response_text = f"เอ๊ะ หนูติดขัดนิดหน่อย แต่ได้ยินว่า: {text_input[:60]}..."
-            logger.info(f"💬 Response: {response_text}")
-            
-            # 3. Generate speech with TTS
-            logger.info("🎤 Generating speech...")
-            if self.tts_engine:
-                audio_data, output_path = await self.tts_engine.generate_speech(
-                    response_text
-                )
-                # ใช้ sample rate จาก core config ของ TTS
-                try:
-                    from core.config import config as core_config
-                    sample_rate = core_config.tts.sample_rate
-                except Exception:
-                    sample_rate = self.config.AUDIO_SAMPLE_RATE
-            else:
-                logger.warning("⚠️  No TTS engine available")
-                audio_data, sample_rate = None, None
-            
-            # 4. Animate VTube Studio model (minimal integration)
-            if self.vts_client:
-                try:
-                    await self.vts_client.set_talking(True)
-                except Exception:
-                    pass
-            
-            # 5. Play audio in Discord
-            if audio_data is not None and self.discord_bot.voice_client:
-                logger.info("🔊 Playing audio...")
+                test_reply = core_config.discord.voice_test_reply_text
+            except Exception:
+                test_reply = ""
+
+            if test_reply:
+                logger.info(f"🧪 Test mode override: speaking fixed reply -> {test_reply}")
+                response_text = test_reply
+
+            logger.info(f"💬 Final response: {response_text}")
+
+            # 2) Generate speech via TTS
+            if not self.tts_engine:
+                logger.warning("⚠️ TTS engine not ready; cannot speak")
+                return
+
+            audio_data, output_path = await self.tts_engine.generate_speech(response_text)
+            if audio_data is None:
+                logger.warning("⚠️ TTS failed to generate audio")
+                return
+
+            # 3) Normalize and DC offset removal before playback
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+            max_val = np.abs(audio_data).max()
+            if max_val > 0:
+                audio_data = audio_data / max_val * 0.95
+            audio_data = audio_data - audio_data.mean()
+
+            # 4) Play audio in Discord
+            sample_rate = core_config.tts.sample_rate
+            if self.discord_bot and self.discord_bot.voice_client:
+                if self.vts_client:
+                    try:
+                        await self.vts_client.set_talking(True)
+                    except Exception:
+                        pass
+
                 await self.discord_bot.play_audio(audio_data, sample_rate)
-            
-            # Stop talking animation after playback
-            if self.vts_client:
-                try:
-                    await self.vts_client.set_talking(False)
-                except Exception:
-                    pass
-            
-            logger.info("✅ Completed processing")
-            
+
+                if self.vts_client:
+                    try:
+                        await self.vts_client.set_talking(False)
+                    except Exception:
+                        pass
+                logger.info("✅ Audio played successfully")
+            else:
+                logger.warning("⚠️ Not connected to a Discord voice channel; cannot play audio")
+
         except Exception as e:
             logger.error(f"❌ Error processing queue item: {e}", exc_info=True)
     

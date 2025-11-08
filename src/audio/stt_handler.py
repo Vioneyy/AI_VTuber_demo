@@ -10,11 +10,11 @@ import subprocess
 import tempfile
 import soundfile as sf
 from typing import Optional, Tuple
+import os
 
-# โหลดค่า config จาก .env ถ้ามี เพื่อสร้าง singleton ให้ main.py ใช้งาน
+# โหลดค่า config จาก .env ผ่าน core.config ที่ชี้พาธ .env ชัดเจน
 try:
-    # main.py เพิ่ม src ลงใน sys.path แล้ว จึง import แบบ absolute ได้
-    from config import Config as AppConfig
+    from core.config import config as AppConfig
 except Exception:
     AppConfig = None
 
@@ -50,6 +50,40 @@ class STTHandler:
         self.model_name = model_name
         self.device = device
         self.language = language
+        
+        # Decode options ที่เข้มงวดเพื่อลดฮัลลูซิเนชันและบังคับภาษาไทย
+        # เน้นความเร็วและความแม่นยำสำหรับคลิปสั้นจาก Discord
+        self.decode_options = {
+            # บังคับภาษาไทยเสมอ (ยกเว้นถ้าตั้งค่าเป็น 'auto')
+            "language": self.language if self.language != "auto" else None,
+            "task": "transcribe",
+            # ลดความสร้างสรรค์ให้โมเดลไม่เดาเป็นภาษาอื่น
+            "temperature": 0.0,
+            # ใช้ beam search แบบเบา ๆ เพื่อความคงเส้นคงวา
+            "beam_size": 5,
+            "best_of": 1,
+            "patience": 1.0,
+            # อย่าใช้อคติจากข้อความก่อนหน้า (แต่ละช่วงพูดเป็นอิสระ)
+            "condition_on_previous_text": False,
+            # ไม่ต้องการ timestamps และ suppress ช่องว่างเกินจำเป็น
+            "without_timestamps": True,
+            "suppress_blank": True,
+            # กรองข้อความที่มี compression ratio สูง (มักจะเป็นฝอย/ก๊อบเบล)
+            "compression_ratio_threshold": 2.4,
+            # ปรับ threshold เพื่อหลีกเลี่ยงการถอดเสียงขณะเงียบ
+            "logprob_threshold": -1.0,
+            "no_speech_threshold": 0.45,
+            # prompt เพื่อ bias บริบทให้เป็นคำไทยสั้น ๆ ทั่วไป
+            "initial_prompt": "การพูดเป็นภาษาไทย ใช้คำสั้นๆ เช่น สวัสดี ครับ ค่ะ",
+        }
+        
+        # จำกัดเวลา STT เพื่อตอบสนองรวมไม่เกิน ~10s ต่อรอบ
+        self.timeout_seconds = 7
+        try:
+            if AppConfig is not None:
+                self.timeout_seconds = int(getattr(AppConfig, 'WHISPER_TIMEOUT_SECONDS', self.timeout_seconds))
+        except Exception:
+            pass
         
         # Check CUDA
         if device == "cuda" and not torch.cuda.is_available():
@@ -200,7 +234,7 @@ class STTHandler:
         แก้ไขปัญหา tensor dimension mismatch
         """
         try:
-            # 1. Convert bytes to numpy (Discord = int16 PCM stereo)
+            # 1. Convert bytes to numpy (Discord = int16 PCM)
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
             
             if len(audio_np) == 0:
@@ -209,28 +243,59 @@ class STTHandler:
             # 2. Convert to float32 [-1, 1]
             audio_np = audio_np.astype(np.float32) / 32768.0
             
-            # 3. Convert stereo to mono (Discord = 2 channels)
-            if len(audio_np) % 2 == 0:  # Stereo
-                audio_np = audio_np.reshape(-1, 2).mean(axis=1)
+            # 3. Channel handling
+            # หมายเหตุ: จากการใช้งาน VoiceRecvClient ในโปรเจกต์นี้ ข้อมูล Discord PCM เป็น mono 48kHz
+            # เดิมมีการพยายาม reshape เป็นสเตริโอด้วยเงื่อนไข len%2==0 ซึ่งทำให้ mono ถูกแปลงผิดพลาด
+            # ดังนั้นให้ถือเป็น mono โดยค่าเริ่มต้นเพื่อหลีกเลี่ยง tensor mismatch
+            # หากในอนาคตต้องรองรับสเตริโอ ควรส่งจำนวนช่องมาจาก adapter หรือใช้ heuristic ที่ชัดเจนกว่า
             
-            # 4. Resample to 16kHz (Whisper requirement)
+            # 4. Pre-filter to reduce hiss/rumble before resample
+            try:
+                from scipy.signal import butter, filtfilt
+                # Bandpass ~80 Hz–8 kHz (typical speech band)
+                nyq = 0.5 * float(source_sr)
+                low = 80.0 / nyq
+                high = 8000.0 / nyq
+                if 0.0 < low < high < 1.0:
+                    b, a = butter(4, [low, high], btype='band')
+                    audio_np = filtfilt(b, a, audio_np).astype(np.float32)
+            except Exception:
+                # หากกรองไม่สำเร็จ ให้ใช้เสียงเดิมต่อไป
+                pass
+
+            # 5. Resample to 16kHz (Whisper requirement) ด้วย polyphase เพื่อลดอาร์ติแฟกต์
             if source_sr != 16000:
-                from scipy import signal as scipy_signal
-                num_samples = int(len(audio_np) * 16000 / source_sr)
-                audio_np = scipy_signal.resample(audio_np, num_samples)
+                try:
+                    from scipy.signal import resample_poly
+                    audio_np = resample_poly(audio_np, 16000, source_sr).astype(np.float32)
+                except Exception:
+                    from scipy import signal as scipy_signal
+                    num_samples = int(len(audio_np) * 16000 / source_sr)
+                    audio_np = scipy_signal.resample(audio_np, num_samples).astype(np.float32)
             
-            # 5. Normalize
-            max_val = np.abs(audio_np).max()
-            if max_val > 0:
-                audio_np = audio_np * (0.95 / max_val)
+            # 6. Normalize ด้วย RMS เพื่อลดการขยาย noise เกินจำเป็น
+            try:
+                rms = float(np.sqrt(np.mean(audio_np**2)) + 1e-8)
+                target_rms = 0.1  # ≈ -20 dBFS สำหรับ STT
+                gain = min(target_rms / rms, 3.0)  # จำกัดไม่ให้ขยายแรงเกิน
+                audio_np = (audio_np * gain).astype(np.float32)
+            except Exception:
+                # Fallback เป็น peak normalize แบบอ่อน
+                max_val = np.abs(audio_np).max()
+                if max_val > 0:
+                    audio_np = (audio_np * (0.8 / max_val)).astype(np.float32)
             
-            # 6. Remove silence
-            audio_np = self._remove_silence(audio_np)
+            # 7. Remove silence ด้วย threshold แบบไดนามิกตาม RMS
+            try:
+                dyn_th = max(0.01, 0.5 * float(np.sqrt(np.mean(audio_np**2))))
+                audio_np = self._remove_silence(audio_np, threshold=dyn_th)
+            except Exception:
+                audio_np = self._remove_silence(audio_np)
             
-            # 7. Fix length (สำคัญ! แก้ tensor dimension error)
+            # 8. Fix length (สำคัญ! แก้ tensor dimension error)
             audio_np = self._fix_length_for_whisper(audio_np)
             
-            # 8. Final validation
+            # 9. Final validation
             if len(audio_np) == 0:
                 return None
             
@@ -385,10 +450,13 @@ class STTHandler:
             # ลอง transcribe (อาจเกิด tensor error)
             loop = asyncio.get_event_loop()
             
-            result = await loop.run_in_executor(
-                None,
-                self._transcribe_with_retry,
-                audio
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    self._transcribe_with_retry,
+                    audio
+                ),
+                timeout=self.timeout_seconds
             )
             
             if result:
@@ -424,12 +492,12 @@ class STTHandler:
             try:
                 logger.debug(f"Attempt {i+1}: fp16={config['fp16']}, device={config['device']}")
                 
+                # ใช้ decode options ที่เข้มงวดเพื่อบังคับภาษาไทยและลดฮัลลูซิเนชัน
                 result = self.model.transcribe(
                     audio,
-                    language=self.language if self.language != 'auto' else None,
-                    task='transcribe',
                     fp16=config['fp16'],
-                    verbose=False
+                    verbose=False,
+                    **self.decode_options
                 )
                 
                 return result
@@ -473,7 +541,10 @@ class STTHandler:
                 '-f', str(temp_path),
                 '-l', self.language,
                 '--output-txt',
-                '--no-timestamps'
+                '--no-timestamps',
+                # เพิ่ม threads และ beam size เพื่อความเร็ว/เสถียร
+                '-t', str(max(1, min(8, (os.cpu_count() or 1)))),
+                '-bs', '5'
             ]
             
             loop = asyncio.get_event_loop()
@@ -483,7 +554,7 @@ class STTHandler:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=30
+                    timeout=self.timeout_seconds
                 )
             )
             
@@ -526,7 +597,7 @@ class STTHandler:
 def _create_global_stt_handler() -> STTHandler:
     """สร้างอินสแตนซ์ STTHandler โดยอิงค่าจาก .env ผ่าน Config"""
     # ค่าเริ่มต้นที่ปลอดภัย
-    model_name = "base"
+    model_name = "tiny"
     device = "cpu"
     language = "th"
     use_cpp = False
