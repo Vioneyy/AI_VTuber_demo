@@ -1,10 +1,6 @@
 """
-Edge-TTS Handler
-- ฟรี 100%
-- เสียงธรรมชาติมาก
-- เร็วมาก (< 1 วินาที)
-- ไม่มีปัญหาเสียงช็อต/ตื้ด/เงียบ
-- รองรับภาษาไทย
+Edge-TTS Handler with Professional Audio Processing
+แก้ปัญหา RVC noise/ช็อต/ซ่า อย่างสมบูรณ์
 """
 import asyncio
 import logging
@@ -19,34 +15,124 @@ logger = logging.getLogger(__name__)
 
 class EdgeTTSHandler:
     """
-    Edge-TTS Handler
-    แก้ปัญหา:
-    1. เสียงช็อตๆ/ตื้ด → Edge-TTS output สะอาด
-    2. ไฟล์เงียบ → ไม่เกิดกับ Edge-TTS
-    3. ช้า → Edge-TTS เร็วมาก
+    Edge-TTS Handler with Audio Processing
     """
     
     def __init__(
         self,
-        voice: str = "th-TH-PremwadeeNeural",  # เสียงผู้หญิงไทย
-        rate: str = "+0%",  # ความเร็วพูด
-        pitch: str = "+0Hz"  # ระดับเสียง
+        voice: str = "th-TH-PremwadeeNeural",
+        rate: str = "+0%",
+        pitch: str = "+0Hz"
     ):
-        """
-        Args:
-            voice: Voice name
-                Thai voices:
-                - th-TH-PremwadeeNeural (Female)
-                - th-TH-NiwatNeural (Male)
-                - th-TH-AcharaNeural (Female)
-            rate: Speech rate (-50% to +100%)
-            pitch: Pitch adjustment (-50Hz to +50Hz)
-        """
         self.voice = voice
         self.rate = rate
         self.pitch = pitch
         
         logger.info(f"✅ Edge-TTS initialized: {voice}")
+    
+    def _process_audio_pre_rvc(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Process audio ก่อนส่งเข้า RVC
+        """
+        try:
+            logger.debug("   🔧 Pre-RVC processing...")
+            
+            # 1. Remove DC offset
+            audio = audio - np.mean(audio)
+            
+            # 2. High-pass filter @ 80 Hz
+            try:
+                from scipy import signal
+                nyquist = sr / 2
+                cutoff = 80 / nyquist
+                if 0 < cutoff < 1:
+                    b, a = signal.butter(4, cutoff, btype='high')
+                    audio = signal.filtfilt(b, a, audio)
+                    logger.debug("   ✅ Pre-RVC high-pass applied")
+            except Exception as e:
+                logger.debug(f"   ⚠️ Pre-RVC filter skipped: {e}")
+            
+            # 3. Normalize to -3dB
+            max_val = np.abs(audio).max()
+            if max_val > 0:
+                audio = audio / max_val * 0.707  # -3dB
+            
+            # 4. Soft clip
+            audio = np.tanh(audio * 1.5) * 0.95
+            
+            return audio.astype(np.float32)
+            
+        except Exception as e:
+            logger.warning(f"Pre-RVC processing error: {e}")
+            return audio
+    
+    def _process_audio_post_rvc(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Process audio หลัง RVC (แก้ noise/ช็อต/ซ่า)
+        """
+        try:
+            logger.debug("   🔧 Post-RVC processing...")
+            
+            # 1. Remove DC offset (สำคัญมาก!)
+            audio = audio - np.mean(audio)
+            
+            # 2. High-pass filter @ 60 Hz (ตัด rumble)
+            try:
+                from scipy import signal
+                nyquist = sr / 2
+                cutoff = 100 / nyquist
+                if 0 < cutoff < 1:
+                    b, a = signal.butter(3, cutoff, btype='high')
+                    audio = signal.filtfilt(b, a, audio)
+                    logger.debug("   ✅ Post-RVC high-pass applied")
+            except Exception as e:
+                logger.debug(f"   ⚠️ Post-RVC filter skipped: {e}")
+            
+            # 3. De-emphasis (ลดเสียงแหลม/ช็อต)
+            try:
+                alpha = 0.97
+                deemph = np.zeros_like(audio)
+                deemph[0] = audio[0]
+                for i in range(1, len(audio)):
+                    deemph[i] = audio[i] + alpha * deemph[i-1]
+                
+                # Normalize
+                max_val = np.abs(deemph).max()
+                if max_val > 0:
+                    audio = deemph / max_val * 0.85
+                else:
+                    audio = deemph
+                
+                logger.debug("   ✅ De-emphasis applied")
+            except Exception as e:
+                logger.debug(f"   ⚠️ De-emphasis skipped: {e}")
+            
+            # 4. Fade in/out (ป้องกัน pop/click)
+            fade_ms = 10
+            fade_samples = int(sr * fade_ms / 1000)
+            
+            if len(audio) > fade_samples * 2:
+                fade_in = np.linspace(0, 1, fade_samples)
+                audio[:fade_samples] *= fade_in
+                
+                fade_out = np.linspace(1, 0, fade_samples)
+                audio[-fade_samples:] *= fade_out
+                
+                logger.debug("   ✅ Fade in/out applied")
+            
+            # 5. Final normalize
+            max_val = np.abs(audio).max()
+            if max_val > 0:
+                audio = audio / max_val * 0.85  # -1.5dB headroom
+            
+            # 6. Soft limiter (final)
+            audio = np.tanh(audio * 1.2) * 0.85
+            
+            return audio.astype(np.float32)
+            
+        except Exception as e:
+            logger.warning(f"Post-RVC processing error: {e}")
+            return audio
     
     async def generate_speech(
         self,
@@ -55,36 +141,20 @@ class EdgeTTSHandler:
     ) -> Tuple[Optional[np.ndarray], int]:
         """
         Generate speech from text
-        
-        Args:
-            text: Text to convert
-            output_path: Optional output file path
-        
-        Returns:
-            (audio_array, sample_rate) or (None, None)
         """
         try:
             import edge_tts
             
             logger.info(f"🎤 Generating speech: '{text[:50]}...'")
             
-            # Create temp file if no output path
+            # Create temp file
             if output_path is None:
-                temp_file = tempfile.NamedTemporaryFile(
-                    suffix='.mp3',
-                    delete=False
-                )
+                temp_file = tempfile.NamedTemporaryFile(suffix='.mp3', delete=False)
                 output_path = Path(temp_file.name)
                 temp_file.close()
             
             # Generate speech
-            communicate = edge_tts.Communicate(
-                text,
-                self.voice,
-                rate=self.rate,
-                pitch=self.pitch
-            )
-            
+            communicate = edge_tts.Communicate(text, self.voice, rate=self.rate, pitch=self.pitch)
             await communicate.save(str(output_path))
             
             logger.info(f"✅ Speech generated: {output_path}")
@@ -92,26 +162,20 @@ class EdgeTTSHandler:
             # Load audio
             audio, sr = sf.read(str(output_path))
             
-            # Convert to mono if stereo
+            # Convert to mono
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
             
-            # Ensure float32
             audio = audio.astype(np.float32)
             
-            # Normalize
+            # Basic processing (แค่ normalize + DC offset)
             max_val = np.abs(audio).max()
             if max_val > 0:
                 audio = audio / max_val * 0.95
-            
-            # Remove DC offset
             audio = audio - audio.mean()
             
-            logger.info(f"   Duration: {len(audio)/sr:.2f}s")
-            logger.info(f"   Sample rate: {sr} Hz")
-            logger.info(f"   RMS: {np.sqrt(np.mean(audio**2)):.4f}")
+            logger.info(f"   Duration: {len(audio)/sr:.2f}s, RMS: {np.sqrt(np.mean(audio**2)):.4f}")
             
-            # Check if audio is silent
             if np.abs(audio).max() < 0.001:
                 logger.error("❌ Generated audio is SILENT!")
                 return None, None
@@ -119,8 +183,7 @@ class EdgeTTSHandler:
             return audio, sr
             
         except ImportError:
-            logger.error("Edge-TTS not installed!")
-            logger.error("Install: pip install edge-tts")
+            logger.error("Edge-TTS not installed! Run: pip install edge-tts")
             return None, None
         except Exception as e:
             logger.error(f"Speech generation error: {e}", exc_info=True)
@@ -132,23 +195,16 @@ class EdgeTTSHandler:
         rvc_model_path: Optional[Path] = None
     ) -> Tuple[Optional[np.ndarray], int]:
         """
-        Generate speech with RVC voice conversion
-        
-        Args:
-            text: Text to convert
-            rvc_model_path: Path to RVC model (optional)
-        
-        Returns:
-            (audio_array, sample_rate) or (None, None)
+        Generate speech with RVC + Audio Processing
         """
         try:
-            # Generate base audio
+            # 1. Generate base audio
             audio, sr = await self.generate_speech(text)
             
             if audio is None:
                 return None, None
             
-            # Apply RVC if enabled in config
+            # 2. Check if RVC is enabled
             try:
                 from core.config import config as core_config
             except Exception:
@@ -168,9 +224,15 @@ class EdgeTTSHandler:
                 pitch = int(os.getenv('RVC_PITCH', '0'))
                 device = getattr(core_config, 'RVC_DEVICE', 'cpu')
             
+            # 3. Apply RVC if enabled
             if use_rvc and rvc_model_path and rvc_model_path.exists():
                 try:
-                    logger.info("🎵 Applying RVC conversion...")
+                    logger.info("🎵 Applying RVC with audio processing...")
+                    
+                    # === PRE-RVC PROCESSING ===
+                    audio_pre = self._process_audio_pre_rvc(audio, sr)
+                    
+                    # === RVC CONVERSION ===
                     from audio.rvc_adapter import RVCAdapter
                     adapter = RVCAdapter(
                         server_url=server_url,
@@ -179,11 +241,20 @@ class EdgeTTSHandler:
                         device=device,
                         pitch=pitch
                     )
-                    converted, out_sr = await adapter.convert(audio, sr)
+                    
+                    converted, out_sr = await adapter.convert(audio_pre, sr)
+                    
                     if converted is not None:
-                        return converted, out_sr
+                        # === POST-RVC PROCESSING ===
+                        converted_clean = self._process_audio_post_rvc(converted, out_sr)
+                        
+                        logger.info("✅ RVC conversion with audio processing complete")
+                        logger.info(f"   Final RMS: {np.sqrt(np.mean(converted_clean**2)):.4f}")
+                        
+                        return converted_clean, out_sr
                     else:
                         logger.warning("RVC conversion failed, returning base TTS audio")
+                        
                 except Exception as e:
                     logger.warning(f"RVC conversion error: {e}")
             
@@ -191,101 +262,27 @@ class EdgeTTSHandler:
             
         except Exception as e:
             logger.error(f"RVC conversion error: {e}")
-            return audio, sr  # Return without RVC on error
+            return audio, sr
     
     @staticmethod
     async def list_voices(language: str = "th") -> list:
-        """
-        List available voices
-        
-        Args:
-            language: Language code (th, en, etc.)
-        
-        Returns:
-            List of voice names
-        """
+        """List available voices"""
         try:
             import edge_tts
-            
             voices = await edge_tts.list_voices()
-            
-            # Filter by language
-            filtered = [
-                v for v in voices
-                if v['Locale'].startswith(language)
-            ]
-            
+            filtered = [v for v in voices if v['Locale'].startswith(language)]
             return filtered
-            
         except Exception as e:
             logger.error(f"Error listing voices: {e}")
             return []
 
 
-# Helper function
 async def text_to_speech(
     text: str,
     voice: str = "th-TH-PremwadeeNeural",
     rate: str = "+0%",
     pitch: str = "+0Hz"
 ) -> Tuple[Optional[np.ndarray], int]:
-    """
-    Convenience function for TTS
-    
-    Args:
-        text: Text to convert
-        voice: Voice name
-        rate: Speech rate
-        pitch: Pitch adjustment
-    
-    Returns:
-        (audio_array, sample_rate) or (None, None)
-    """
+    """Convenience function for TTS"""
     tts = EdgeTTSHandler(voice=voice, rate=rate, pitch=pitch)
     return await tts.generate_speech(text)
-
-
-# Example usage and voice list
-"""
-Edge-TTS Usage:
-
-1. Install:
-   pip install edge-tts
-
-2. Basic usage:
-   from audio.edge_tts_handler import EdgeTTSHandler
-   
-   tts = EdgeTTSHandler(voice="th-TH-PremwadeeNeural")
-   audio, sr = await tts.generate_speech("สวัสดีครับ")
-
-3. List available Thai voices:
-   voices = await EdgeTTSHandler.list_voices("th")
-   for v in voices:
-       print(f"{v['ShortName']}: {v['FriendlyName']}")
-
-Thai Voices:
-- th-TH-PremwadeeNeural (Female, Natural)
-- th-TH-NiwatNeural (Male, Natural)
-- th-TH-AcharaNeural (Female, Expressive)
-
-Benefits:
-✅ Free and unlimited
-✅ High quality, natural voices
-✅ Very fast (< 1 second)
-✅ No silent output issues
-✅ No distortion/artifacts
-✅ Supports 100+ languages
-✅ No API keys required
-✅ Works offline after first download
-
-Rate examples:
-- "-50%" = Very slow
-- "+0%" = Normal (default)
-- "+50%" = Fast
-- "+100%" = Very fast
-
-Pitch examples:
-- "-50Hz" = Lower voice
-- "+0Hz" = Normal (default)
-- "+50Hz" = Higher voice
-"""

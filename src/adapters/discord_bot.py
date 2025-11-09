@@ -81,12 +81,42 @@ class DiscordBotAdapter:
         async def on_ready():
             """Bot ready"""
             logger.info(f"✅ Discord Bot พร้อมแล้ว: {self.bot.user}")
-            await self.bot.change_presence(
-                activity=discord.Activity(
-                    type=discord.ActivityType.listening,
-                    name="🎤 คำสั่งเสียง"
+            # แสดง presence สั้น ๆ ให้รู้ว่ามีคำสั่งอะไรบ้าง
+            try:
+                await self.bot.change_presence(
+                    activity=discord.Activity(
+                        type=discord.ActivityType.listening,
+                        name="ใช้ !help | !join | !voice | !ask"
+                    )
                 )
-            )
+            except Exception:
+                pass
+            
+            # ส่งข้อความช่วยเหลือไปยัง system channel (ถ้ามีสิทธิ์และยังไม่ส่ง)
+            try:
+                if not hasattr(self, "_help_broadcasted") or not self._help_broadcasted:
+                    help_text = (
+                        "📝 **คำสั่ง Jeed Bot**\n"
+                        "!join — ให้บอทเข้าห้องเสียง\n"
+                        "!leave — ให้บอทออกจากห้องเสียง\n"
+                        "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้\n"
+                        "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ\n"
+                        "!rvc on/off — เปิด/ปิดการใช้ RVC\n"
+                        "!status — ดูสถานะระบบโดยย่อ\n"
+                        "!help — แสดงคู่มือคำสั่งนี้อีกครั้ง"
+                    )
+                    for guild in self.bot.guilds:
+                        channel = getattr(guild, 'system_channel', None)
+                        if channel:
+                            perms = channel.permissions_for(guild.me)
+                            if getattr(perms, 'send_messages', False):
+                                try:
+                                    await channel.send(help_text)
+                                except Exception:
+                                    continue
+                    self._help_broadcasted = True
+            except Exception:
+                pass
         
         @self.bot.event
         async def on_voice_state_update(member, before, after):
@@ -130,8 +160,7 @@ class DiscordBotAdapter:
                 logger.info(f"✅ เชื่อมต่อห้อง: {channel.name}")
                 await ctx.send(f"✅ เข้าห้อง {channel.name} แล้วค่ะ!")
                 
-                # เริ่มฟัง
-                await self._start_listening()
+                # ไม่เริ่มฟังอัตโนมัติ ให้ใช้ !voice on เพื่อเริ่มรับเสียง
                 
             except Exception as e:
                 logger.error(f"Error in join: {e}")
@@ -548,14 +577,18 @@ class NumpyAudioSource(discord.AudioSource):
         # Resample to 48kHz (Discord requirement)
         if sample_rate != 48000:
             try:
+                from math import gcd
                 from scipy.signal import resample_poly
-                audio_data = resample_poly(audio_data, 48000, sample_rate)
+                g = gcd(int(sample_rate), 48000)
+                up = int(48000 // g)
+                down = int(sample_rate // g)
+                audio_data = resample_poly(audio_data, up, down).astype(np.float32)
             except Exception:
-                # Fallback: linear interpolation
-                new_len = int(len(audio_data) * 48000 / sample_rate)
+                # Fallback: linear interpolation (คุณภาพรองลงมา)
+                new_len = int(len(audio_data) * 48000 / float(sample_rate))
                 x_old = np.linspace(0.0, 1.0, num=len(audio_data), endpoint=False)
                 x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
-                audio_data = np.interp(x_new, x_old, audio_data)
+                audio_data = np.interp(x_new, x_old, audio_data).astype(np.float32)
         
         # Remove DC offset
         try:
@@ -563,16 +596,8 @@ class NumpyAudioSource(discord.AudioSource):
         except Exception:
             pass
 
-        # Gentle low-pass to reduce hiss (~12 kHz)
-        try:
-            from scipy.signal import butter, filtfilt
-            nyq = 0.5 * 48000.0
-            cutoff = 12000.0 / nyq
-            if 0.0 < cutoff < 1.0:
-                b, a = butter(4, cutoff, btype='low')
-                audio_data = filtfilt(b, a, audio_data).astype(np.float32)
-        except Exception:
-            pass
+        # NOTE: เดิมมี low-pass ~12k เพื่อลด hiss แต่ทำให้เสียงอับ/ทึบ
+        # จึงถอดออกเพื่อคงความใสของเสียงไว้
 
         # Soft limiter to avoid clicks/pops from sudden peaks
         try:

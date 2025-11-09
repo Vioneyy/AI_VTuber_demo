@@ -363,13 +363,9 @@ class JeedAIVTuber:
                 logger.warning("⚠️ TTS failed to generate audio")
                 return
 
-            # 3) Normalize and DC offset removal before playback
+            # 3) เตรียมข้อมูลเป็น float32 เท่านั้น (ย้าย normalize ไปทำใน playback)
             if audio_data.dtype != np.float32:
                 audio_data = audio_data.astype(np.float32)
-            max_val = np.abs(audio_data).max()
-            if max_val > 0:
-                audio_data = audio_data / max_val * 0.95
-            audio_data = audio_data - audio_data.mean()
 
             # 4) Play audio in Discord
             sample_rate = tts_sample_rate or core_config.tts.sample_rate
