@@ -48,6 +48,12 @@ class JeedAIVTuber:
     def __init__(self):
         """Initialize AI VTuber"""
         self.config = core_config
+        # Force-disable RVC for TTS-only testing
+        try:
+            self.config.rvc.enabled = False
+            logger.info("🔇 RVC disabled: running in TTS-only test mode")
+        except Exception:
+            pass
         
         # Components
         self.queue_manager: SmartQueueManager = None
@@ -347,18 +353,8 @@ class JeedAIVTuber:
                 logger.warning("⚠️ TTS engine not ready; cannot speak")
                 return
 
-            # ใช้ RVC หากเปิดใช้งานและมีโมเดล
-            try:
-                use_rvc = getattr(core_config, 'rvc').enabled
-                rvc_model = Path(getattr(core_config, 'rvc').model_path)
-            except Exception:
-                use_rvc = False
-                rvc_model = None
-
-            if use_rvc and rvc_model and rvc_model.exists():
-                audio_data, tts_sample_rate = await self.tts_engine.generate_speech_with_rvc(response_text, rvc_model)
-            else:
-                audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
+            # TTS-only path for testing (RVC disabled)
+            audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
             if audio_data is None:
                 logger.warning("⚠️ TTS failed to generate audio")
                 return
