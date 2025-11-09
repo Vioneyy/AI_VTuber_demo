@@ -48,10 +48,9 @@ class JeedAIVTuber:
     def __init__(self):
         """Initialize AI VTuber"""
         self.config = core_config
-        # Force-disable RVC for TTS-only testing
+        # ใช้การตั้งค่า RVC จาก config โดยไม่บังคับปิด
         try:
-            self.config.rvc.enabled = False
-            logger.info("🔇 RVC disabled: running in TTS-only test mode")
+            logger.info(f"🎛️ RVC enabled: {bool(self.config.ENABLE_RVC)} (ตาม config)")
         except Exception:
             pass
         
@@ -348,13 +347,26 @@ class JeedAIVTuber:
 
             logger.info(f"💬 Final response: {response_text}")
 
-            # 2) Generate speech via TTS
+            # 2) Generate speech via TTS/RVC ตาม config
             if not self.tts_engine:
                 logger.warning("⚠️ TTS engine not ready; cannot speak")
                 return
 
-            # TTS-only path for testing (RVC disabled)
-            audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
+            # ใช้ RVC ถ้าเปิดใช้งานและ handler รองรับ
+            use_rvc = False
+            try:
+                use_rvc = bool(core_config.ENABLE_RVC)
+            except Exception:
+                use_rvc = False
+
+            try:
+                if use_rvc and hasattr(self.tts_engine, 'generate_speech_with_rvc'):
+                    audio_data, tts_sample_rate = await self.tts_engine.generate_speech_with_rvc(response_text)
+                else:
+                    audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
+            except Exception as gen_e:
+                logger.warning(f"⚠️ Speech generation error: {gen_e}")
+                audio_data, tts_sample_rate = None, None
             if audio_data is None:
                 logger.warning("⚠️ TTS failed to generate audio")
                 return

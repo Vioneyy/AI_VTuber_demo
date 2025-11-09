@@ -560,6 +560,21 @@ class NumpyAudioSource(discord.AudioSource):
         except Exception:
             pass
 
+        # จัดการจำนวนแชนเนลให้เป็น mono ก่อน (ถ้าจำเป็น)
+        try:
+            if isinstance(audio_data, np.ndarray) and audio_data.ndim == 2:
+                # ถ้าเป็นสเตอริโออยู่แล้ว ให้แปลงเป็น mono โดยเฉลี่ย เพื่อหลีกเลี่ยงการแตกต่างของ channel
+                if audio_data.shape[1] >= 2:
+                    audio_data = audio_data.mean(axis=1).astype(np.float32)
+                else:
+                    audio_data = audio_data.reshape(-1).astype(np.float32)
+        except Exception:
+            # หากตรวจรูปทรงล้มเหลว ใช้แบบเดิม
+            try:
+                audio_data = audio_data.astype(np.float32)
+            except Exception:
+                pass
+
         # Optional: save raw input for debugging
         try:
             from core.config import config as _cfg
