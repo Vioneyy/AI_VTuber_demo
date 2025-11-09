@@ -462,7 +462,7 @@ class DiscordBotAdapter:
             # แปลง numpy array เป็น audio source
             audio_source = NumpyAudioSource(audio_data, sample_rate)
             
-            # บันทึกเสียงออกจากบอท (PCM16 mono @48kHz) เป็นไฟล์ WAV
+            # บันทึกเสียงออกจากบอท (PCM16 stereo @48kHz) เป็นไฟล์ WAV
             try:
                 from core.config import config
                 if getattr(config.discord, 'voice_playback_record_enabled', False):
@@ -475,7 +475,7 @@ class DiscordBotAdapter:
                     # เขียนเป็น WAV 16-bit @48kHz จาก audio_source.audio_bytes
                     import wave
                     with wave.open(str(out_path), 'wb') as wf:
-                        wf.setnchannels(1)
+                        wf.setnchannels(2)
                         wf.setsampwidth(2)  # 16-bit
                         wf.setframerate(48000)
                         wf.writeframes(audio_source.audio_bytes)
@@ -652,12 +652,19 @@ class NumpyAudioSource(discord.AudioSource):
         except Exception as e:
             logger.debug(f"Fade-in/out failed: {e}")
         
-        # Convert to int16
+        # Convert to int16 (mono)
         audio_data = np.clip(audio_data, -1.0, 1.0)
-        audio_data = (audio_data * 32767).astype(np.int16)
-        
+        mono_int16 = (audio_data * 32767).astype(np.int16)
+
+        # Convert to stereo (duplicate mono to L/R and interleave)
+        try:
+            stereo_int16 = np.stack([mono_int16, mono_int16], axis=1).reshape(-1)
+        except Exception:
+            # Fallback if stacking fails for any reason
+            stereo_int16 = np.repeat(mono_int16, 2)
+
         # Convert to bytes
-        self.audio_bytes = audio_data.tobytes()
+        self.audio_bytes = stereo_int16.tobytes()
 
         # Optional: save final PCM16 stream as WAV (48k) for debugging
         try:
@@ -671,7 +678,7 @@ class NumpyAudioSource(discord.AudioSource):
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 out_path = dbg_dir / f"bot_final_pcm_{ts}.wav"
                 with _wave.open(str(out_path), 'wb') as wf:
-                    wf.setnchannels(1)
+                    wf.setnchannels(2)
                     wf.setsampwidth(2)
                     wf.setframerate(48000)
                     wf.writeframes(self.audio_bytes)
@@ -682,17 +689,17 @@ class NumpyAudioSource(discord.AudioSource):
         try:
             tail_pad_ms = 40
             pad_samples = int(48000 * (tail_pad_ms / 1000.0))
-            pad_bytes = pad_samples * 2  # int16 mono
+            pad_bytes = pad_samples * 4  # int16 stereo (2 channels)
             if pad_bytes > 0:
                 self.audio_bytes += b"\x00" * pad_bytes
         except Exception as e:
             logger.debug(f"Tail pad failed: {e}")
         self.position = 0
         
-        # Discord expects 20ms frames at 48kHz
-        # 48000 samples/sec * 0.02 sec = 960 samples
-        # 960 samples * 2 bytes = 1920 bytes per frame
-        self.frame_size = 1920
+        # Discord expects 20ms frames at 48kHz, stereo (2 channels)
+        # 48000 samples/sec * 0.02 sec = 960 samples per channel
+        # 960 samples * 2 bytes * 2 channels = 3840 bytes per frame
+        self.frame_size = 3840
     
     def read(self) -> bytes:
         """Read next audio frame"""
