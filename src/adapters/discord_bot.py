@@ -590,20 +590,28 @@ class NumpyAudioSource(discord.AudioSource):
                 x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
                 audio_data = np.interp(x_new, x_old, audio_data).astype(np.float32)
         
-        # Remove DC offset
+        # Remove DC offset (เฉพาะกรณีมี DC จริง ๆ)
         try:
-            audio_data = (audio_data - float(np.mean(audio_data))).astype(np.float32)
+            mean_val = float(np.mean(audio_data))
+            if abs(mean_val) > 1e-5:
+                audio_data = (audio_data - mean_val).astype(np.float32)
+            else:
+                audio_data = audio_data.astype(np.float32)
         except Exception:
             pass
 
-        # NOTE: เดิมมี low-pass ~12k เพื่อลด hiss แต่ทำให้เสียงอับ/ทึบ
-        # จึงถอดออกเพื่อคงความใสของเสียงไว้
-
-        # Soft limiter to avoid clicks/pops from sudden peaks
+        # Gentle low-pass ~18 kHz เพื่อลดภาพการ upsample โดยไม่ทำให้เสียงทึบ
         try:
-            audio_data = (np.tanh(1.2 * audio_data) / np.tanh(1.2)).astype(np.float32)
+            from scipy.signal import butter, filtfilt
+            nyq = 0.5 * 48000.0
+            cutoff = 18000.0 / nyq  # 18kHz
+            if 0.0 < cutoff < 1.0:
+                b, a = butter(2, cutoff, btype='low')
+                audio_data = filtfilt(b, a, audio_data).astype(np.float32)
         except Exception:
             pass
+
+        # เอา soft limiter ออกเพื่อหลีกเลี่ยงการบีบไดนามิก
 
         # Ensure in range [-1, 1]
         max_val = np.abs(audio_data).max()
