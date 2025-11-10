@@ -34,7 +34,7 @@ class F5TTSThai:
 
         self.use_reference = os.getenv("F5_TTS_USE_REFERENCE", "false").lower() == "true"
         # ค่าเริ่มต้นพาธไฟล์อ้างอิงเสียงชี้ไปยังไฟล์ในโปรเจ็กต์โดยตรง
-        self.ref_audio_path = os.getenv("TTS_REFERENCE_WAV", r"d:\AI_VTuber_demo\ref_audio.wav")
+        self.ref_audio_path = os.getenv("TTS_REFERENCE_WAV", "reference_audio/jeed_voice.wav")
         self.ref_text = os.getenv("F5_TTS_REF_TEXT", "")
         self.speed = float(os.getenv("F5_TTS_SPEED", "1.0"))
         self.steps = int(os.getenv("F5_TTS_STEPS", "32"))  # default 32

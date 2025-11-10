@@ -57,11 +57,13 @@ class LLMHandler:
                 {"role": "system", "content": sprompt}
             ] + hist
 
-            # กำหนด max_tokens แบบไดนามิกตามความยาวคำถาม
+            # กำหนด max_tokens แบบไดนามิกตามความยาวคำถาม (ปรับให้ไม่ตัดประโยคกลางคัน)
+            # หมายเหตุ: ภาษาไทยมี tokenization ละเอียดกว่า ทำให้จำนวนโทเค็นสูงขึ้นต่อความยาวข้อความ
+            # จึงขยายเพดานและปรับสูตรให้ปลอดภัยขึ้น แต่ยังไม่เกิน config.llm.max_tokens
             approx_len = len(user_message)
             dynamic_max = min(
                 config.llm.max_tokens,
-                max(40, min(80, 20 + approx_len // 4))
+                max(64, min(128, 32 + approx_len // 3))
             )
             
             # เรียก API

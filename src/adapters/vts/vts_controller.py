@@ -34,5 +34,13 @@ class VTSController:
         # map การพูดไปยัง state SPEAKING หรือกลับไป IDLE
         await self._controller.set_state(AnimationState.SPEAKING if talking else AnimationState.IDLE)
 
+    async def start_speaking(self, text: str):
+        """เริ่มพูด พร้อมกระตุ้น lip sync ตามข้อความ"""
+        await self._controller.start_speaking(text)
+
+    async def stop_speaking(self):
+        """หยุดพูด และปิดการขยับปาก"""
+        await self._controller.stop_speaking()
+
     async def disconnect(self):
         await self._controller.disconnect()

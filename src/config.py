@@ -37,12 +37,7 @@ class Config:
     F5_TTS_REF_TEXT = os.getenv('F5_TTS_REF_TEXT', 'สวัสดีค่ะ')
     
     # ===============================
-    # RVC Configuration
-    # ===============================
-    RVC_MODEL_PATH = os.getenv('RVC_MODEL_PATH', 'rvc_models/jeed_anime.pth')
-    RVC_INDEX_PATH = os.getenv('RVC_INDEX_PATH', 'rvc_models/jeed_anime.index')
-    RVC_PITCH = int(os.getenv('RVC_PITCH', '0'))
-    RVC_DEVICE = os.getenv('RVC_DEVICE', 'cpu')
+    # (ลบ RVC ออกแล้ว ใช้งานเฉพาะ TTS เท่านั้น)
     
     # ===============================
     # Whisper STT Configuration
@@ -146,7 +141,6 @@ class Config:
         print(f"🗣️  Language: {cls.AI_LANGUAGE}")
         print(f"🧠 LLM Model: {cls.LLM_MODEL} (max_tokens={cls.LLM_MAX_TOKENS})")
         print(f"🎤 TTS Device: {cls.TTS_DEVICE}")
-        print(f"🎵 RVC Device: {cls.RVC_DEVICE}")
         print(f"👂 STT Model: {cls.WHISPER_MODEL}")
         print(f"🎮 VTube Studio: {cls.VTS_WS_URL}")
         print(f"📺 YouTube: {'Enabled' if cls.YOUTUBE_ENABLED else 'Disabled'}")

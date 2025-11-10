@@ -1,6 +1,6 @@
 """
 Complete Diagnostic Script
-วิเคราะห์ปัญหาทั้งหมดของ STT, TTS, และ GPU (ปรับใหม่ให้ใช้ Faster-Whisper + Edge-TTS)
+วิเคราะห์ปัญหาทั้งหมดของ STT, TTS, และ GPU (Faster-Whisper + F5-TTS-Thai)
 """
 import sys
 from pathlib import Path
@@ -171,35 +171,40 @@ def check_stt():
         print("❌ faster-whisper not installed")
 
 def check_tts():
-    """ตรวจสอบ TTS (Edge-TTS)"""
+    """ตรวจสอบ TTS (F5-TTS-Thai)"""
     print("\n" + "="*60)
-    print("🔍 4. TTS Check (Edge-TTS)")
+    print("🔍 4. TTS Check (F5-TTS-Thai)")
     print("="*60)
-    
+
     try:
         import asyncio
-        import edge_tts
-        print("✅ edge-tts installed")
-        
-        voice = os.getenv('EDGE_TTS_VOICE', 'th-TH-PremwadeeNeural')
-        text = "สวัสดีค่ะ กำลังทดสอบเสียงพูดจากเอดจ์ทีทีเอส"
-        out_path = Path("temp/diagnose_edge_tts.mp3")
+        from audio.f5_tts_handler import F5TTSHandler
+        from pathlib import Path
+
+        text = "สวัสดีค่ะ กำลังทดสอบเสียงพูดจาก F5-TTS-Thai"
+        out_path = Path("temp/diagnose_f5_tts.wav")
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         async def run_test():
-            communicate = edge_tts.Communicate(text=text, voice=voice)
-            await communicate.save(str(out_path))
-        
-        asyncio.run(run_test())
-        
-        if out_path.exists() and out_path.stat().st_size > 0:
+            tts = F5TTSHandler()
+            audio, sr = await tts.generate_speech(text)
+            if audio is None:
+                print("❌ TTS generated empty audio")
+                return False
+            import soundfile as sf
+            sf.write(str(out_path), audio.astype('float32'), sr)
+            return True
+
+        ok = asyncio.run(run_test())
+
+        if ok and out_path.exists() and out_path.stat().st_size > 0:
             print(f"✅ Synthesized audio: {out_path}")
         else:
             print("❌ TTS output file missing or empty")
-    except ImportError:
-        print("❌ edge-tts not installed")
+    except ImportError as e:
+        print(f"❌ F5-TTS module not available: {e}")
     except Exception as e:
-        print(f"❌ Edge-TTS test failed: {e}")
+        print(f"❌ F5-TTS-Thai test failed: {e}")
 
 def analyze_problem():
     """วิเคราะห์ปัญหา"""
@@ -267,7 +272,7 @@ def recommendations():
     
     print(f"\n🔧 Immediate Fixes:")
     print(f"   1. ใช้ Faster-Whisper สำหรับ STT (แนะนำ)")
-    print(f"   2. ใช้ Edge-TTS สำหรับ TTS (แนะนำ)")
+    print(f"   2. ใช้ F5-TTS-Thai สำหรับ TTS (แนะนำ)")
     print(f"   3. ตรวจสอบระดับเสียงและการจัดรูปแบบไฟล์")
     print(f"   4. เปิดใช้ GPU หากรองรับ เพื่อความเร็ว")
     

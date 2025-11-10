@@ -79,24 +79,11 @@ class TTSConfig:
     f5_tts_checkpoint: str = "models/f5_tts_thai.pth"
     f5_tts_vocab: str = "models/vocab.txt"
 
-@dataclass
-class RVCConfig:
-    """การตั้งค่า RVC Voice Conversion"""
-    enabled: bool = os.getenv("ENABLE_RVC", "true").lower() == "true"
-    model_path: str = "rvc_models/jeed_anime.pth"
-    index_path: str = "rvc_models/jeed_anime.index"
-    server_url: str = os.getenv("RVC_SERVER_URL", "http://localhost:7860/api/convert")
-    voice_preset: str = os.getenv("VOICE_PRESET", "anime_girl")
-    pitch: int = 12
-    filter_radius: int = 3
-    rms_mix_rate: float = 0.8
-    protect: float = 0.33
-    use_gpu: bool = True
 
 @dataclass
 class VTubeStudioConfig:
     """การตั้งค่า VTube Studio"""
-    websocket_url: str = "ws://localhost:8001"
+    websocket_url: str = os.getenv("VTS_WS_URL", "ws://localhost:8001")
     plugin_name: str = os.getenv("VTS_PLUGIN_NAME", "Jeed_AI_VTuber")
     plugin_token: str = os.getenv("VTS_PLUGIN_TOKEN", "")
     model_name: str = "Hiyori_A"
@@ -194,7 +181,6 @@ class Config:
         self.stt = STTConfig()
         self.llm = LLMConfig()
         self.tts = TTSConfig()
-        self.rvc = RVCConfig()
         self.vtube = VTubeStudioConfig()
         self.discord = DiscordConfig()
         self.youtube = YouTubeConfig()
@@ -212,7 +198,6 @@ class Config:
         dirs = [
             self.system.log_dir,
             str(BASE_DIR / "reference_audio"),
-            str(BASE_DIR / "rvc_models"),
             str(BASE_DIR / "models")
         ]
         for dir_path in dirs:
@@ -248,16 +233,6 @@ class Config:
         # Warning checks
         if not Path(self.tts.reference_wav).exists():
             warnings.append(f"⚠️ ไม่พบไฟล์เสียงอ้างอิง: {self.tts.reference_wav}")
-        # RVC model check (optional)
-        if self.rvc.enabled:
-            if not Path(self.rvc.model_path).exists():
-                warnings.append(f"⚠️ ไม่พบโมเดล RVC: {self.rvc.model_path}")
-            if not self.rvc.server_url:
-                warnings.append("⚠️ ไม่ตั้งค่า RVC_SERVER_URL (จะไม่สามารถแปลงผ่าน RVC ได้)")
-            
-        if self.rvc.enabled and not Path(self.rvc.model_path).exists():
-            warnings.append(f"⚠️ ไม่พบโมเดล RVC: {self.rvc.model_path}")
-            
         if not Path(self.stt.whisper_bin_path).exists():
             warnings.append(f"⚠️ ไม่พบ Whisper.cpp: {self.stt.whisper_bin_path}")
         
@@ -313,13 +288,6 @@ class Config:
     def TTS_REFERENCE_WAV(self) -> str:
         return self.tts.reference_wav
 
-    @property
-    def ENABLE_RVC(self) -> bool:
-        return self.rvc.enabled
-
-    @property
-    def RVC_MODEL_PATH(self) -> str:
-        return self.rvc.model_path
 
     @property
     def VTS_PLUGIN_NAME(self) -> str:
@@ -353,10 +321,6 @@ class Config:
         # Prefer explicit .env override; else map from use_gpu
         return os.getenv("TTS_DEVICE", 'cuda' if self.system.use_gpu else 'cpu')
 
-    @property
-    def RVC_DEVICE(self) -> str:
-        """Device for RVC conversion. Falls back to GPU flag if not set."""
-        return os.getenv("RVC_DEVICE", 'cuda' if self.system.use_gpu else 'cpu')
 
     # ===== Additional compatibility for STT/Python Whisper and admin/queue =====
     @property
@@ -404,7 +368,6 @@ class Config:
         return self.stt.n_gpu_layers
         print(f"LLM Model: {self.llm.model}")
         print(f"TTS Engine: {self.tts.engine}")
-        print(f"RVC Enabled: {self.rvc.enabled}")
         print(f"VTube Studio: {self.vtube.model_name}")
         print(f"Discord Bot: {'Enabled' if self.discord.token else 'Disabled'}")
         print(f"YouTube Live: {'Enabled' if self.youtube.enabled else 'Disabled'}")

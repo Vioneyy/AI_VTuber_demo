@@ -1,7 +1,7 @@
 """
 GPU Memory Manager
 แก้ไขปัญหา:
-1. TTS/RVC/STT แย่ง VRAM
+1. TTS/STT แย่ง VRAM
 2. OOM errors
 3. GPU queue conflicts
 """
@@ -45,7 +45,6 @@ class GPUMemoryManager:
             return {
                 'stt': 'cpu',
                 'tts': 'cpu',
-                'rvc': 'cpu',
                 'llm': 'cpu'
             }
         
@@ -54,7 +53,6 @@ class GPUMemoryManager:
             return {
                 'stt': 'cuda:0',
                 'tts': 'cuda:0',
-                'rvc': 'cuda:0',
                 'llm': 'cpu'  # LLM ใช้ API ไม่ต้อง GPU
             }
         
@@ -63,14 +61,12 @@ class GPUMemoryManager:
             return {
                 'stt': 'cuda:0',
                 'tts': 'cuda:1',
-                'rvc': 'cuda:1',
                 'llm': 'cpu'
             }
         
         return {
             'stt': self.device,
             'tts': self.device,
-            'rvc': self.device,
             'llm': 'cpu'
         }
     
@@ -306,7 +302,7 @@ def get_device_for(module: str) -> str:
     Get optimal device for module
     
     Args:
-        module: Module name ('stt', 'tts', 'rvc', 'llm')
+        module: Module name ('stt', 'tts', 'llm')
     
     Returns:
         Device string (e.g., 'cuda:0' or 'cpu')

@@ -5,6 +5,7 @@ Environment Configuration Checker
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import requests
 import sys
 
 # โหลด .env จากพาธโปรเจกต์โดยชัดเจน
@@ -111,21 +112,26 @@ def main():
     check_optional('LLM_TEMPERATURE', os.getenv('LLM_TEMPERATURE', ''), '0.7')
     
     # =================================
-    # 4. TTS Configuration (Edge-TTS)
+    # 4. TTS Configuration (F5-TTS-Thai)
     # =================================
-    print_section("TTS Configuration (Edge-TTS)")
-    
-    # Edge-TTS ไม่ต้องใช้ CUDA/Torch จึงไม่มีการเช็คอุปกรณ์
-    voice = os.getenv('EDGE_TTS_VOICE', '')
-    if not voice:
-        print("⚠️  EDGE_TTS_VOICE: ไม่ตั้งค่า (จะใช้เสียงดีฟอลต์)")
-        print("   ตัวอย่างเสียงไทย: th-TH-PremwadeeNeural, th-TH-NiwatNeural")
+    print_section("TTS Configuration (F5-TTS-Thai)")
+
+    engine = os.getenv('TTS_ENGINE', '')
+    if engine != 'f5_tts_thai':
+        print("⚠️  TTS_ENGINE: ตั้งค่าเป็นค่าอื่นอยู่ (ควรเป็น 'f5_tts_thai')")
     else:
-        print(f"✅ EDGE_TTS_VOICE: {voice}")
-    
-    # ไม่ต้องใช้ไฟล์อ้างอิงเสียงหรือข้อความอ้างอิงสำหรับ Edge-TTS
-    
-    # (ลบ) RVC Configuration – ไม่ใช้แล้ว
+        print("✅ TTS_ENGINE=f5_tts_thai")
+
+    device = os.getenv('TTS_DEVICE', '')
+    if not device:
+        print("⚠️  TTS_DEVICE: ไม่ตั้งค่า (ระบบจะเลือกอัตโนมัติตาม GPU)")
+    else:
+        print(f"✅ TTS_DEVICE={device}")
+
+    ref_audio = os.getenv('F5_TTS_REF_AUDIO', '')
+    ref_text = os.getenv('F5_TTS_REF_TEXT', '')
+    print(f"ℹ️ F5_TTS_REF_AUDIO={ref_audio or '(not set)'}")
+    print(f"ℹ️ F5_TTS_REF_TEXT={ref_text or '(not set)'}")
     
     # =================================
     # 5. STT Configuration (Faster-Whisper)
@@ -141,18 +147,53 @@ def main():
     # 6. RVC Configuration (optional)
     # =================================
     print_section("RVC Configuration (optional)")
-    rvc_enabled = os.getenv('ENABLE_RVC', 'false').lower() == 'true'
+
+    rvc_enabled = os.getenv('RVC_ENABLED', 'false').lower() == 'true'
+    server_url = os.getenv('RVC_SERVER_URL', 'http://localhost:7865')
+    webui_dir = os.getenv('RVC_WEBUI_DIR', '').strip()
+
+    print(f"ℹ️ RVC_ENABLED={'true' if rvc_enabled else 'false'}")
+    check_optional('RVC_SERVER_URL', server_url, 'http://localhost:7865')
+
+    # ตรวจไฟล์โมเดลหากเปิดใช้งาน
     if rvc_enabled:
-        print("✅ ENABLE_RVC: เปิดใช้งาน")
-        rvc_model = os.getenv('RVC_MODEL_PATH', 'rvc_models/jeed_anime.pth')
-        check_file_exists('RVC_MODEL_PATH', rvc_model)
-        rvc_server = os.getenv('RVC_SERVER_URL', '')
-        if rvc_server:
-            print(f"✅ RVC_SERVER_URL: {rvc_server}")
+        model_pth = os.getenv('RVC_MODEL_PTH', '')
+        model_index = os.getenv('RVC_MODEL_INDEX', '')
+        if model_pth:
+            check_file_exists('RVC_MODEL_PTH', model_pth)
         else:
-            print("⚠️  RVC_SERVER_URL: ว่าง (จะไม่สามารถแปลงผ่าน RVC ได้)")
-    else:
-        print("ℹ️ ENABLE_RVC: ปิดใช้งาน")
+            print("⚠️  RVC_MODEL_PTH: ไม่ตั้งค่า (จำเป็นเมื่อใช้ RVC)")
+        if model_index:
+            check_file_exists('RVC_MODEL_INDEX', model_index)
+        else:
+            print("⚠️  RVC_MODEL_INDEX: ไม่ตั้งค่า (แนะนำให้ตั้งค่าเพื่อคุณภาพที่ดี)")
+
+        # ตรวจ infer-web.py หากมีการตั้งค่าโฟลเดอร์ WebUI
+        if webui_dir:
+            infer_py = Path(webui_dir) / 'infer-web.py'
+            if infer_py.exists():
+                print(f"✅ infer-web.py: พบที่ {infer_py}")
+            else:
+                print(f"❌ infer-web.py: ไม่พบที่ {infer_py}")
+                warnings.append('RVC_WEBUI_DIR set but infer-web.py not found')
+        else:
+            print("⚠️  RVC_WEBUI_DIR: ว่าง (จะไม่เปิด WebUI อัตโนมัติ)")
+
+        # ตรวจว่าเซิร์ฟเวอร์ขึ้นหรือไม่
+        try:
+            resp = requests.get(server_url.rstrip('/'), timeout=1.5)
+            if resp.status_code < 500:
+                print(f"✅ RVC WebUI: ออนไลน์ที่ {server_url}")
+            else:
+                print(f"⚠️  RVC WebUI: ตอบกลับสถานะ {resp.status_code}")
+                warnings.append('RVC server responded with error status')
+        except Exception:
+            print("⚠️  RVC WebUI: ไม่ตอบสนอง (อาจยังไม่เปิดหรือพอร์ตไม่ตรง)")
+            # แนะนำแนวทางแก้ไขเบื้องต้น
+            if webui_dir:
+                print("   → ตรวจสอบว่าโฟลเดอร์ WebUI มี infer-web.py และสามารถรันได้")
+            else:
+                print("   → ตั้งค่า RVC_WEBUI_DIR เพื่อให้ระบบเปิด WebUI อัตโนมัติ")
     
     # =================================
     # 7. VTube Studio Configuration

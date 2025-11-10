@@ -347,6 +347,36 @@ class VTubeStudioController:
         except Exception as e:
             # ไม่ต้อง print error ทุกครั้ง (จะ spam มาก)
             pass
+
+    async def set_parameter_value(self, param_name: str, value: float, immediate: bool = True):
+        """ตั้งค่าพารามิเตอร์เดี่ยว (เช่น MouthOpen) จากแหล่งภายนอก
+        - Clamp ตาม min/max ของโมเดล
+        - อัพเดท smooth target เพื่อให้เคลื่อนไหวนุ่มนวล
+        - ถ้า immediate=True จะส่ง InjectParameterDataRequest ทันที
+        """
+        try:
+            if param_name not in self.available_parameters:
+                return
+            info = self.available_parameters[param_name]
+            clamped = max(info['min'], min(info['max'], value))
+            # อัพเดทค่าเป้าหมายสำหรับ smoothing
+            if param_name in self.smooth_values:
+                self.smooth_values[param_name].set_target(clamped)
+
+            if immediate and self.authenticated and self.model_loaded and self.ws:
+                req = {
+                    "apiName": "VTubeStudioPublicAPI",
+                    "apiVersion": "1.0",
+                    "requestID": "inject_param_single",
+                    "messageType": "InjectParameterDataRequest",
+                    "data": {
+                        "parameterValues": [{"id": param_name, "value": clamped}]
+                    }
+                }
+                await self.ws.send(json.dumps(req))
+        except Exception:
+            # เงียบไว้เพื่อหลีกเลี่ยง spam ระหว่างเล่นเสียง
+            pass
     
     def set_emotion(self, emotion: Emotion, intensity: float):
         """ตั้งค่าอารมณ์"""

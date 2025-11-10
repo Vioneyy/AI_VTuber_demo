@@ -54,7 +54,6 @@ def fix_env():
     settings_to_fix = {
         'WHISPER_CPP_ENABLED': 'false',
         'TTS_DEVICE': 'cuda',
-        'RVC_DEVICE': 'cuda',
         'WHISPER_DEVICE': 'cuda',
     }
     
@@ -128,10 +127,10 @@ def update_main_py():
             "from audio.stt_handler import STTHandler",
             "from audio.hybrid_stt import HybridSTT as STTHandler"
         ),
-        # TTS
+        # TTS: switch to F5TTSHandler
         (
-            "from audio.edge_tts_handler import EdgeTTSHandler",
-            "from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler"
+            "from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler",
+            "from audio.f5_tts_handler import F5TTSHandler"
         ),
     ]
     
@@ -160,7 +159,7 @@ def create_required_files():
     
     required_files = {
         "src/audio/hybrid_stt.py": "HybridSTT (from artifact)",
-        "src/audio/fixed_tts_rvc_handler.py": "FixedTTSRVCHandler (from artifact)",
+        "src/audio/f5_tts_handler.py": "F5TTSHandler (exists)",
     }
     
     missing = []
@@ -263,11 +262,11 @@ async def test_tts():
     print("\\n🧪 Testing TTS...")
     
     try:
-        from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler
+        from audio.f5_tts_handler import F5TTSHandler
         
-        tts = FixedTTSRVCHandler(tts_device="cpu", rvc_device="cpu")
+        tts = F5TTSHandler()
         
-        audio, sr = await tts.generate_speech("สวัสดีครับ", apply_rvc=False)
+        audio, sr = await tts.generate_speech("สวัสดีครับ")
         
         if audio is not None and len(audio) > 0:
             print(f"✅ TTS works! Generated {len(audio)} samples at {sr}Hz")

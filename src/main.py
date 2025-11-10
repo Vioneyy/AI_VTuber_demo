@@ -17,8 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.queue_manager import SmartQueueManager, QueueItem
 from adapters.discord_bot import DiscordBotAdapter
 from audio.hybrid_stt import HybridSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
-from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler  # ใช้ Edge-TTS แทน RVC เพื่อความเร็วและเสียงธรรมชาติ
-from audio.edge_tts_handler import EdgeTTSHandler  # ✅ เพิ่มบรรทัดนี้!
+from audio.f5_tts_handler import F5TTSHandler
 from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
 from llm.chatgpt_client import ChatGPTClient
@@ -48,11 +47,7 @@ class JeedAIVTuber:
     def __init__(self):
         """Initialize AI VTuber"""
         self.config = core_config
-        # ใช้การตั้งค่า RVC จาก config โดยไม่บังคับปิด
-        try:
-            logger.info(f"🎛️ RVC enabled: {bool(self.config.ENABLE_RVC)} (ตาม config)")
-        except Exception:
-            pass
+        # โหมด TTS-only: ตัด RVC ออกทั้งหมด
         
         # Components
         self.queue_manager: SmartQueueManager = None
@@ -101,15 +96,34 @@ class JeedAIVTuber:
             self.stt_handler = None
             logger.warning("⚠️  Continuing without STT")
         
-        # Initialize TTS Engine (Edge-TTS)
-        logger.info("📦 Loading TTS engine (Edge-TTS)...")
+        # Initialize TTS Engine (F5-TTS-Thai)
+        logger.info("📦 Loading TTS engine (F5-TTS-Thai)...")
         try:
-            self.tts_engine = EdgeTTSHandler()  # ✅ ตอนนี้มี import แล้ว!
+            # ใช้ reference_wav จาก config หากตั้งค่าไว้
+            ref_wav = None
+            try:
+                ref_wav = getattr(self.config.tts, 'reference_wav', None)
+            except Exception:
+                ref_wav = None
+
+            self.tts_engine = F5TTSHandler(reference_wav=ref_wav)
             logger.info("✅ TTS handler loaded")
         except Exception as e:
             logger.warning(f"⚠️  TTS handler failed to load: {e}")
             self.tts_engine = None
             logger.warning("⚠️  Continuing without TTS")
+
+        # Ensure RVC WebUI server is running if enabled
+        try:
+            import os
+            if os.getenv("RVC_ENABLED", "false").lower() == "true":
+                from adapters.rvc.rvc_server_launcher import ensure_server_running
+                if ensure_server_running():
+                    logger.info("✅ RVC WebUI พร้อมใช้งาน")
+                else:
+                    logger.info("ℹ️ ไม่ได้เปิด RVC WebUI อัตโนมัติ (ตรวจสอบ .env:RVC_WEBUI_DIR)")
+        except Exception as e:
+            logger.warning(f"⚠️ เปิด RVC WebUI อัตโนมัติผิดพลาด: {e}")
 
         # Initialize LLM Response Generator
         logger.info("🧠 Initializing LLM ResponseGenerator...")
@@ -347,23 +361,13 @@ class JeedAIVTuber:
 
             logger.info(f"💬 Final response: {response_text}")
 
-            # 2) Generate speech via TTS/RVC ตาม config
+            # 2) Generate speech via TTS (TTS-only)
             if not self.tts_engine:
                 logger.warning("⚠️ TTS engine not ready; cannot speak")
                 return
 
-            # ใช้ RVC ถ้าเปิดใช้งานและ handler รองรับ
-            use_rvc = False
             try:
-                use_rvc = bool(core_config.ENABLE_RVC)
-            except Exception:
-                use_rvc = False
-
-            try:
-                if use_rvc and hasattr(self.tts_engine, 'generate_speech_with_rvc'):
-                    audio_data, tts_sample_rate = await self.tts_engine.generate_speech_with_rvc(response_text)
-                else:
-                    audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
+                audio_data, tts_sample_rate = await self.tts_engine.generate_speech(response_text)
             except Exception as gen_e:
                 logger.warning(f"⚠️ Speech generation error: {gen_e}")
                 audio_data, tts_sample_rate = None, None
@@ -375,22 +379,44 @@ class JeedAIVTuber:
             if audio_data.dtype != np.float32:
                 audio_data = audio_data.astype(np.float32)
 
+            # 3.5) Optional: ส่งเข้า RVC Server เพื่อแปลงเสียงตามโมเดลที่ระบุใน .env
+            try:
+                import os
+                from adapters.rvc.rvc_client import RVCClient, is_enabled as rvc_enabled
+                if rvc_enabled():
+                    logger.info("🎚️ RVC enabled — converting voice via external server...")
+                    rvc = RVCClient()
+                    audio_data, tts_sample_rate = rvc.convert(audio_data, tts_sample_rate or core_config.tts.sample_rate)
+                else:
+                    logger.debug("RVC disabled — using raw TTS output")
+            except Exception as rvc_e:
+                logger.warning(f"⚠️ RVC step error: {rvc_e}")
+
             # 4) Play audio in Discord
             sample_rate = tts_sample_rate or core_config.tts.sample_rate
             if self.discord_bot and self.discord_bot.voice_client:
                 if self.vts_client:
                     try:
-                        await self.vts_client.set_talking(True)
+                        # ใช้ start_speaking เพื่อกระตุ้น lip sync ตามข้อความจริง
+                        await self.vts_client.start_speaking(response_text)
                     except Exception:
-                        pass
+                        # fallback เผื่อเวอร์ชันเก่ายังไม่มีเมธอด
+                        try:
+                            await self.vts_client.set_talking(True)
+                        except Exception:
+                            pass
 
                 await self.discord_bot.play_audio(audio_data, sample_rate)
 
                 if self.vts_client:
                     try:
-                        await self.vts_client.set_talking(False)
+                        await self.vts_client.stop_speaking()
                     except Exception:
-                        pass
+                        # fallback
+                        try:
+                            await self.vts_client.set_talking(False)
+                        except Exception:
+                            pass
                 logger.info("✅ Audio played successfully")
             else:
                 logger.warning("⚠️ Not connected to a Discord voice channel; cannot play audio")

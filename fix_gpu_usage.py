@@ -106,7 +106,6 @@ def check_env_config():
     # Check device settings
     devices = {
         'TTS_DEVICE': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'RVC_DEVICE': 'cuda' if torch.cuda.is_available() else 'cpu',
         'WHISPER_DEVICE': 'cuda' if torch.cuda.is_available() else 'cpu',
     }
     
@@ -214,16 +213,7 @@ try:
 except Exception as e:
     print(f"❌ TTS: {e}")
 
-# Test RVC
-try:
-    # Test PyTorch GPU
-    if torch.cuda.is_available():
-        test_tensor = torch.randn(100, 100).cuda()
-        print(f"✅ RVC/PyTorch can use GPU")
-    else:
-        print(f"❌ CUDA not available for RVC")
-except Exception as e:
-    print(f"❌ RVC: {e}")
+# Removed RVC test (TTS-only mode)
 
 print("\\nGPU Memory:")
 if torch.cuda.is_available():

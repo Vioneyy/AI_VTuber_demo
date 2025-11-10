@@ -32,11 +32,11 @@ async def test_tts():
     print("\n🧪 Testing TTS...")
     
     try:
-        from audio.fixed_tts_rvc_handler import FixedTTSRVCHandler
+        from audio.f5_tts_handler import F5TTSHandler
         
-        tts = FixedTTSRVCHandler(tts_device="cpu", rvc_device="cpu")
+        tts = F5TTSHandler()
         
-        audio, sr = await tts.generate_speech("สวัสดีครับ", apply_rvc=False)
+        audio, sr = await tts.generate_speech("สวัสดีครับ")
         
         if audio is not None and len(audio) > 0:
             print(f"✅ TTS works! Generated {len(audio)} samples at {sr}Hz")

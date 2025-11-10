@@ -1,7 +1,7 @@
 # AI VTuber Demo
 
-โปรเจกต์ตัวอย่างเพื่อสาธิตการเชื่อมต่อ LLM, TTS, และ VTube Studio พร้อมอะแดปเตอร์สำหรับ Discord และ YouTube Live (ปรับใหม่ให้ใช้ Edge-TTS + Faster-Whisper)
-รองรับการแปลงเสียงผ่าน RVC แบบทางเลือกด้วยเซิร์ฟเวอร์ภายนอก
+โปรเจกต์ตัวอย่างเพื่อสาธิตการเชื่อมต่อ LLM, TTS, และ VTube Studio พร้อมอะแดปเตอร์สำหรับ Discord และ YouTube Live (ปรับใหม่ให้ใช้ F5-TTS-Thai + Faster-Whisper)
+โหมดปัจจุบัน: TTS-only (ลบ RVC ออกทั้งหมด)
 
 ## โครงสร้าง
 ```
@@ -33,8 +33,7 @@ AI_VTuber_demo/
      │  └─ vts/
      ├─ audio/
      │  ├─ __init__.py
-     │  ├─ edge_tts_handler.py        # TTS ด้วย Microsoft Edge (เร็ว/คุณภาพดี)
-     │  ├─ rvc_adapter.py            # ตัวแปลงเสียงผ่าน RVC REST server (ทางเลือก)
+     │  ├─ f5_tts_handler.py         # TTS ด้วย F5-TTS-Thai (คุณภาพเสียงธรรมชาติ)
      │  └─ faster_whisper_stt.py     # STT ด้วย Faster-Whisper (เร็ว/เสถียร)
      ├─ main.py
 ```
@@ -67,10 +66,21 @@ pip install -r requirements.txt
 - ตั้งค่าภาษาที่ต้องการใน `.env` เช่น `WHISPER_LANG=th`
 - รองรับ GPU อัตโนมัติผ่าน CTranslate2 (ขึ้นกับไลบรารีที่ติดตั้งโดยแพ็กเกจ)
 
-### TTS (Edge-TTS)
-- ใช้ Microsoft Edge-TTS (ฟรี/เร็ว/เสียงธรรมชาติ)
-- ติดตั้ง `pip install edge-tts`
-- สามารถเลือกเสียงไทย เช่น `th-TH-PremwadeeNeural`, `th-TH-NiwatNeural`
+### TTS (F5-TTS-Thai)
+- ใช้ F5-TTS-Thai สำหรับสังเคราะห์เสียงภาษาไทยจากข้อความ
+- ติดตั้ง `pip install f5-tts-th`
+- แนะนำให้ตั้งค่าไฟล์อ้างอิงเสียงและข้อความอ้างอิงเพื่อให้เสียงคงเส้นคงวา
+
+ตัวแปรที่เกี่ยวข้องใน `.env` (ตัวอย่าง):
+- `TTS_ENGINE=f5_tts_thai`
+- `TTS_DEVICE=cuda` หรือ `cpu`
+- `TTS_REFERENCE_WAV=reference_audio/jeed_voice.wav`
+- `F5_TTS_REF_AUDIO=reference_audio/jeed_voice.wav`
+- `F5_TTS_REF_TEXT=สวัสดีค่ะ ฉันชื่อจีด`
+- `F5_TTS_SPEED=1.0` (ปรับความเร็ว)
+- `F5_TTS_STEPS=32` (จำนวนสเต็ป)
+- `F5_TTS_CFG_STRENGTH=2.0` (ความแรงของ CFG)
+- `F5_TTS_SAMPLE_RATE=24000` (ค่าเริ่มต้นของเสียงที่สังเคราะห์)
 
 ## การรัน (โหมดสาธิต)
 ```
@@ -79,21 +89,19 @@ python src/main.py
 
 ## ใช้บอทใน Discord
 - คำสั่ง `!join` ให้บอทเข้าห้องเสียง
-- พูดในห้องเสียง บอทจะถอดความด้วย Faster-Whisper และตอบเสียงด้วย Edge-TTS
+- พูดในห้องเสียง บอทจะถอดความด้วย Faster-Whisper และตอบเสียงด้วย F5-TTS-Thai
 - คำสั่ง `!leave` ออกจากห้องเสียง
 
 หมายเหตุ:
-- บอทจะถอดความและพูดตอบโดยอัตโนมัติโดยใช้ Edge-TTS เป็นฐานเสียง
-- หากตั้งค่า `ENABLE_RVC=true` และมีเซิร์ฟเวอร์ RVC พร้อมใช้งาน ระบบจะส่งเสียงไปแปลงผ่าน RVC แล้วเล่นใน Discord
+- บอทจะถอดความและพูดตอบโดยอัตโนมัติโดยใช้ F5-TTS-Thai เป็นฐานเสียง
 - ข้อความที่ถอดความจะถูกส่งเข้า `QueueManager` และประมวลผลเหมือนข้อความแชทปกติ (ส่งต่อเข้า LLM, สร้าง TTS, ฯลฯ)
 
-### RVC (ทางเลือก)
-- ตั้งค่าใน `.env`:
-  - `ENABLE_RVC=true`
-  - `RVC_MODEL_PATH` ชี้ไปที่โมเดลใน `d:\AI_VTuber_demo\rvc_models\...`
-  - `RVC_SERVER_URL` URL ของ REST endpoint สำหรับแปลงเสียง เช่น `http://localhost:7860/api/convert`
-- รันเซิร์ฟเวอร์ RVC ที่รองรับการรับไฟล์เสียงและคืนไฟล์เสียงที่แปลงแล้ว (ตัวอย่างเช่น Mangio-RVC-WebUI ที่เพิ่ม REST API)
-- หากการแปลงล้มเหลว ระบบจะ fallback เป็นเสียงจาก Edge-TTS ตามเดิม
+### RVC Server (Optional)
+โปรเจกต์นี้ลบ RVC ภายในออกเพื่อความเรียบง่าย แต่หากต้องการใช้ voice conversion ภายนอก สามารถตั้งค่าเซิร์ฟเวอร์ RVC แยกต่างหากได้:
+- เลือกใช้เครื่องมืออย่าง "RVC WebUI" หรือ "so-vits-svc"
+- เตรียมโมเดลในโฟลเดอร์ `rvc_models/` (ไฟล์ที่มีอยู่เป็นตัวอย่างจากเวอร์ชันก่อนหน้า)
+- รันเซิร์ฟเวอร์ RVC ให้รับ HTTP/WS บนเครื่องทดสอบ (เช่น `http://localhost:7865`)
+- บอทนี้ไม่ได้เชื่อมต่อ RVC โดยตรง หากต้องการผสานเสียง ให้ประมวลผลไฟล์ที่ได้จาก TTS ด้วยเซิร์ฟเวอร์ RVC ภายนอก แล้วนำไฟล์ที่แปลงแล้วไปเล่นในระบบเสียงของคุณ
 
 ## การปรับ Motion เพื่อความเสถียร
 - ปรับการเร่ง/หน่วง (acceleration/deceleration) ให้เริ่ม-หยุดนุ่มนวลขึ้นผ่านการปรับโค้ง interpolation ในตัวควบคุมการเคลื่อนไหว
@@ -115,5 +123,5 @@ python src/main.py
 - ไม่มีหน้า Web UI สำหรับดูพฤติกรรม motion ในโปรเจกต์นี้ ขณะทดสอบให้สังเกตผลผ่านหน้าจอ VTube Studio โดยตรง
 
 ## หมายเหตุการล้างไฟล์เก่า
-- โค้ด/สคริปต์ที่เกี่ยวกับ RVC และ whisper.cpp ถูกลบออกจากโปรเจกต์เพื่อความเรียบง่าย
-- หากต้องการกลับไปใช้ whisper.cpp หรือ RVC สามารถดู commit เดิมใน Git history
+- โค้ด/สคริปต์ที่เกี่ยวกับ RVC ถูกลบออกจากโปรเจกต์เพื่อความเรียบง่าย
+- หากต้องการกลับไปใช้ RVC สามารถดู commit เดิมใน Git history

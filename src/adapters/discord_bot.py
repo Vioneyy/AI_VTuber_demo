@@ -101,7 +101,6 @@ class DiscordBotAdapter:
                         "!leave — ให้บอทออกจากห้องเสียง\n"
                         "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้\n"
                         "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ\n"
-                        "!rvc on/off — เปิด/ปิดการใช้ RVC\n"
                         "!status — ดูสถานะระบบโดยย่อ\n"
                         "!help — แสดงคู่มือคำสั่งนี้อีกครั้ง"
                     )
@@ -234,31 +233,7 @@ class DiscordBotAdapter:
                 logger.error(f"ask command error: {e}")
                 await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
 
-        @self.bot.command(name='rvc')
-        async def rvc(ctx, state: Optional[str] = None):
-            """เปิด/ปิด RVC: !rvc on / !rvc off"""
-            try:
-                # จำกัดสิทธิ์เบื้องต้น: เฉพาะ admin_ids หากกำหนดไว้
-                if self.admin_ids and str(ctx.author.id) not in {str(x) for x in self.admin_ids}:
-                    await ctx.send("❌ คุณไม่มีสิทธิ์เปลี่ยนการตั้งค่า RVC")
-                    return
-
-                if not state:
-                    await ctx.send(f"🎵 RVC: {'เปิด' if getattr(config.rvc, 'enabled', False) else 'ปิด'} | โมเดล: {getattr(config.rvc, 'model_path', 'ไม่ตั้งค่า')}")
-                    return
-
-                s = state.lower()
-                if s == 'on':
-                    config.rvc.enabled = True
-                    await ctx.send("🎵 เปิด RVC แล้วค่ะ")
-                elif s == 'off':
-                    config.rvc.enabled = False
-                    await ctx.send("🎵 ปิด RVC แล้วค่ะ (จะใช้เสียง TTS ตรง)")
-                else:
-                    await ctx.send("❌ ใช้: !rvc on หรือ !rvc off")
-            except Exception as e:
-                logger.error(f"rvc command error: {e}")
-                await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+        # ลบคำสั่ง RVC ออก (ใช้งานเฉพาะ TTS เท่านั้น)
 
         @self.bot.command(name='status')
         async def status(ctx):
@@ -271,7 +246,6 @@ class DiscordBotAdapter:
                     f"- VTS: {'พร้อม' if self.external_status.get('vts_connected') else 'ไม่พร้อม'}",
                     f"- TTS: {'พร้อม' if self.external_status.get('tts_ready') else 'ไม่พร้อม'}",
                     f"- Queue: {'พร้อม' if self.external_status.get('queue_ready') else 'ไม่พร้อม'}",
-                    f"- RVC: {'เปิด' if getattr(config.rvc, 'enabled', False) else 'ปิด'}",
                 ]
                 await ctx.send("\n".join(lines))
             except Exception as e:
@@ -288,7 +262,6 @@ class DiscordBotAdapter:
                     "!leave — ให้บอทออกจากห้องเสียง",
                     "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้",
                     "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ",
-                    "!rvc on/off — เปิด/ปิดการใช้ RVC",
                     "!status — ดูสถานะระบบโดยย่อ",
                 ]
                 await ctx.send("\n".join(cmds))
@@ -532,7 +505,7 @@ class DiscordBotAdapter:
             })
             # ปรับ presence เล็กน้อยตามสถานะ
             try:
-                status_txt = f"🎤 Voice {'ON' if self.is_recording else 'OFF'} | TTS {'OK' if tts_ready else 'X'} | RVC {'ON' if getattr(config.rvc, 'enabled', False) else 'OFF'}"
+        status_txt = f"🎤 Voice {'ON' if self.is_recording else 'OFF'} | TTS {'OK' if tts_ready else 'X'}"
                 asyncio.create_task(self.bot.change_presence(
                     activity=discord.Activity(type=discord.ActivityType.listening, name=status_txt)
                 ))

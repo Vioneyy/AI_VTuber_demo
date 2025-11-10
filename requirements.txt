@@ -22,7 +22,9 @@ pydub==0.25.1
 scipy==1.11.4
 
 # TTS/STT
-edge-tts==6.1.12
+f5-tts-th
+torch
+torchaudio
 faster-whisper==0.10.0
 
 # RVC (removed)

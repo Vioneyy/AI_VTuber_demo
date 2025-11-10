@@ -1,69 +1,47 @@
 """
-ทดสอบ TTS - Edge TTS และ gTTS
+ทดสอบ TTS - F5-TTS-Thai
 """
 import asyncio
-import edge_tts
 from pathlib import Path
 
-async def test_edge_tts():
-    """ทดสอบ Edge TTS"""
-    print("🔊 Testing Edge TTS...")
-    
-    text = "สวัสดีค่ะ ฉันชื่อจีด ยินดีที่ได้รู้จัก"
-    output_file = "test_edge.mp3"
-    
-    # Thai voices available in Edge TTS
-    voice = "th-TH-PremwadeeNeural"  # Female voice
-    # voice = "th-TH-NiwatNeural"  # Male voice
-    
-    try:
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(output_file)
-        print(f"✅ Edge TTS สำเร็จ: {output_file}")
-        return True
-    except Exception as e:
-        print(f"❌ Edge TTS ล้มเหลว: {e}")
-        return False
+async def test_f5_tts():
+    """ทดสอบ F5-TTS-Thai"""
+    print("🔊 Testing F5-TTS-Thai...")
 
-def test_gtts():
-    """ทดสอบ gTTS"""
-    print("\n🔊 Testing gTTS...")
-    
-    from gtts import gTTS
-    
-    text = "สวัสดีค่ะ ฉันชื่อจีด ยินดีที่ได้รู้จัก"
-    output_file = "test_gtts.mp3"
-    
     try:
-        tts = gTTS(text=text, lang='th', slow=False)
-        tts.save(output_file)
-        print(f"✅ gTTS สำเร็จ: {output_file}")
-        return True
+        from src.audio.f5_tts_handler import F5TTSHandler
+        tts = F5TTSHandler()
+        text = "สวัสดีค่ะ ฉันชื่อจีด ยินดีที่ได้รู้จัก"
+        audio, sr = await tts.generate_speech(text)
+        out = Path("test_f5_tts.wav")
+        if audio is not None and len(audio) > 0:
+            import soundfile as sf
+            sf.write(str(out), audio.astype('float32'), sr)
+            print(f"✅ F5-TTS-Thai สำเร็จ: {out}")
+            return True
+        else:
+            print("❌ F5-TTS-Thai generated empty audio")
+            return False
     except Exception as e:
-        print(f"❌ gTTS ล้มเหลว: {e}")
+        print(f"❌ F5-TTS-Thai ล้มเหลว: {e}")
         return False
 
 async def main():
     print("=" * 60)
     print("🧪 TTS Testing Suite")
     print("=" * 60)
-    
-    # Test Edge TTS
-    edge_ok = await test_edge_tts()
-    
-    # Test gTTS
-    gtts_ok = test_gtts()
-    
+
+    ok = await test_f5_tts()
+
     print("\n" + "=" * 60)
     print("📊 Results:")
-    print(f"  Edge TTS: {'✅ OK' if edge_ok else '❌ FAILED'}")
-    print(f"  gTTS: {'✅ OK' if gtts_ok else '❌ FAILED'}")
+    print(f"  F5-TTS-Thai: {'✅ OK' if ok else '❌ FAILED'}")
     print("=" * 60)
-    
-    if edge_ok or gtts_ok:
+
+    if ok:
         print("\n✅ TTS ทำงานได้! ตอนนี้ลองเล่นไฟล์เสียงที่สร้างดู")
     else:
-        print("\n❌ TTS ไม่ทำงาน ตรวจสอบการติดตั้ง library")
+        print("\n❌ TTS ไม่ทำงาน ตรวจสอบการติดตั้ง f5-tts-th และไฟล์อ้างอิง")
 
 if __name__ == "__main__":
     asyncio.run(main())
