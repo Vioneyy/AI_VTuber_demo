@@ -4,6 +4,7 @@ response_generator.py - Response Generation System
 """
 
 import logging
+import re
 from typing import Optional, Tuple
 from .safety_filter import SafetyFilter, SafetyLevel, get_safety_filter
 from .admin_commands import get_admin_handler
@@ -174,20 +175,38 @@ class ResponseGenerator:
         return random.choice(templates)
     
     def _ensure_concise(self, text: str, max_sentences: int = 3) -> str:
-        """ตัดข้อความให้สั้น กระชับ"""
-        # แยกประโยค
-        sentences = text.split('.')
-        
-        # เอาแค่ n ประโยคแรก
-        if len(sentences) > max_sentences:
-            sentences = sentences[:max_sentences]
-            text = '.'.join(sentences) + '.'
-        
-        # ตัดถ้ายาวเกิน 200 ตัวอักษร
-        if len(text) > 200:
-            text = text[:197] + "..."
-        
-        return text.strip()
+        """ตัดข้อความให้สั้น กระชับ และพยายามจบที่ขอบประโยค"""
+        raw = text.strip()
+        if not raw:
+            return raw
+
+        # แยกประโยคด้วยตัวคั่นมาตรฐาน (อังกฤษ/เอเชีย) และช่องว่างหลังตัวคั่น
+        parts = re.split(r"(?<=[\.!?…\u3002\uFF01\uFF1F])\s+", raw)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        # เอาเฉพาะจำนวนประโยคแรกตามที่กำหนด
+        if len(parts) > max_sentences:
+            parts = parts[:max_sentences]
+
+        concise = " ".join(parts)
+
+        # จำกัดความยาวอักขระโดยพยายามจบที่เครื่องหมายวรรคตอน
+        max_chars = 200
+        if len(concise) > max_chars:
+            clipped = concise[:max_chars]
+            # หาเครื่องหมายวรรคตอนสุดท้ายภายในขีดจำกัด
+            m = re.search(r"[\.!?…\u3002\uFF01\uFF1F](?=[^\.!?…\u3002\uFF01\uFF1F]*$)", clipped)
+            if m:
+                end = m.end()
+                concise = clipped[:end]
+            else:
+                concise = clipped.rstrip() + "..."
+
+        # ถ้าไม่ได้จบด้วยเครื่องหมายวรรคตอน ให้เติมจุดไข่ปลาเพื่อไม่ให้ดูตัดกลางคัน
+        if not re.search(r"[\.!?…\u3002\uFF01\uFF1F]$", concise):
+            concise = concise.rstrip() + "..."
+
+        return concise
 
 
 # Singleton

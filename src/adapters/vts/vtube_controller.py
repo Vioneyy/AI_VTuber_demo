@@ -83,6 +83,9 @@ class VTubeStudioController:
         self.movement_duration = random.uniform(1.5, 3.0)
         self.eye_movement_duration = random.uniform(0.8, 2.0)
         self.current_intensity_multiplier = 1.0
+        # Lip sync state
+        self._lip_sync_task: Optional[asyncio.Task] = None
+        self._lip_sync_running: bool = False
     
     async def connect(self) -> bool:
         """เชื่อมต่อกับ VTube Studio"""
@@ -309,6 +312,78 @@ class VTubeStudioController:
                 await asyncio.sleep(1)
         
         print("🛑 Animation Loop หยุดทำงาน")
+
+    async def start_lip_sync_from_file(self, audio_file_path: str):
+        """Lip sync โดยอ้างอิงจากไฟล์เสียงจริง (WAV PCM16)
+        - อ่านบัฟเฟอร์ทีละ 20ms
+        - คำนวณ RMS พร้อม envelope follower (attack/release)
+        - ส่งค่า MouthOpen แบบ smooth ไปยัง VTS
+        """
+        if not self.authenticated or not self.model_loaded:
+            return
+        if 'MouthOpen' not in self.available_parameters:
+            return
+
+        async def _run():
+            import wave
+            import numpy as np
+            try:
+                self._lip_sync_running = True
+                with wave.open(audio_file_path, 'rb') as wav:
+                    sample_rate = wav.getframerate()
+                    n_frames = wav.getnframes()
+                    # อ่านทั้งหมดครั้งเดียว (ไฟล์สั้นจาก TTS)
+                    audio_bytes = wav.readframes(n_frames)
+                audio = np.frombuffer(audio_bytes, dtype=np.int16)
+                # 20ms chunk
+                chunk_size = max(1, int(sample_rate * 0.02))
+                ema = 0.0
+                attack = 0.5
+                release = 0.1
+
+                for i in range(0, len(audio), chunk_size):
+                    if not self._lip_sync_running:
+                        break
+                    chunk = audio[i:i+chunk_size].astype(np.float32)
+                    if chunk.size == 0:
+                        continue
+                    rms = float(np.sqrt(np.mean(chunk ** 2)))
+                    # normalize สำหรับ 16-bit PCM
+                    volume = min(rms / 2500.0, 1.0)
+                    # envelope follower
+                    if volume > ema:
+                        ema = attack * volume + (1 - attack) * ema
+                    else:
+                        ema = release * volume + (1 - release) * ema
+
+                    mouth_open = max(0.0, min(1.0, ema * 1.4))
+                    try:
+                        await self.set_parameter_value('MouthOpen', mouth_open, immediate=True)
+                        # Optional: mouth form parameter if present
+                        if 'MouthForm' in self.available_parameters:
+                            mouth_form = 0.5 if mouth_open > 0.3 else 0.0
+                            await self.set_parameter_value('MouthForm', mouth_form, immediate=False)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(chunk_size / sample_rate)
+            except Exception:
+                # เงียบไว้เพื่อหลีกเลี่ยง spam ระหว่างเล่นเสียง
+                pass
+            finally:
+                self._lip_sync_running = False
+                try:
+                    await self.set_parameter_value('MouthOpen', 0.0, immediate=True)
+                except Exception:
+                    pass
+
+        # ยกเลิกงานเดิมถ้ามี แล้วสร้างใหม่
+        if self._lip_sync_task and not self._lip_sync_task.done():
+            self._lip_sync_running = False
+            try:
+                self._lip_sync_task.cancel()
+            except Exception:
+                pass
+        self._lip_sync_task = asyncio.create_task(_run())
     
     async def _send_parameters(self, parameters: Dict[str, float]):
         """ส่งค่าพารามิเตอร์ไปยัง VTS"""
@@ -414,6 +489,13 @@ class VTubeStudioController:
     async def stop_speaking(self):
         """หยุดพูด"""
         self.state = AnimationState.IDLE
+        # หยุด lip sync ที่กำลังทำงานอยู่ด้วย
+        self._lip_sync_running = False
+        if self._lip_sync_task and not self._lip_sync_task.done():
+            try:
+                self._lip_sync_task.cancel()
+            except Exception:
+                pass
         if 'MouthOpen' in self.smooth_values:
             self.smooth_values['MouthOpen'].set_target(0.0)
     

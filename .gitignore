@@ -1,23 +1,26 @@
-.venv/
-.env
-*.env
-*.log
-vtuber.log
-logs/
-temp/
-temp_ref_prepared.wav
-temp_silent_ref.wav
+# Python
 __pycache__/
-*.pyc
-.DS_Store
-.idea/
-.vscode/
-*.zip
-*.tmp
+*.py[cod]
+*.pyo
 
-# Keep reference_audio tracked
-!reference_audio/
+# Virtual env
+.venv/
+env/
+venv/
 
-# Exclude heavy binaries and builds
+# Logs and temp
+logs/
+*.log
+temp/
+
+# Secrets
+.env
+
+# Models and large binaries
+models/*.bin
 tools/ffmpeg/ffmpeg-8.0-essentials_build/
-models/
+tools/ffmpeg/ffmpeg-release-essentials.zip
+
+# OS files
+.DS_Store
+Thumbs.db

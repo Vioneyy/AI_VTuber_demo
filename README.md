@@ -61,6 +61,10 @@ pip install -r requirements.txt
 - `LLM_MAX_TOKENS` จำกัดความยาวคำตอบ (แนะนำ 128 เพื่อความเร็ว)
 - `RESPONSE_TIMEOUT` ค่าเริ่มต้น 10 วินาที
 
+### สวิตช์เปิด/ปิดโมดูล
+- `DISCORD_ENABLED=true|false` เปิด/ปิดการทำงานของบอท Discord (ถ้าปิด ไม่จำเป็นต้องตั้ง `DISCORD_BOT_TOKEN`)
+- `VTS_ENABLED=true|false` เปิด/ปิดการเชื่อมต่อ VTube Studio (ถ้าปิดจะข้ามการเชื่อมต่อและลูปแอนิเมชัน)
+
 ### STT (Faster-Whisper)
 - ไม่ต้อง build อะไรเพิ่ม ติดตั้งผ่าน `pip install faster-whisper`
 - ตั้งค่าภาษาที่ต้องการใน `.env` เช่น `WHISPER_LANG=th`
@@ -70,6 +74,11 @@ pip install -r requirements.txt
 - ใช้ F5-TTS-Thai สำหรับสังเคราะห์เสียงภาษาไทยจากข้อความ
 - ติดตั้ง `pip install f5-tts-th`
 - แนะนำให้ตั้งค่าไฟล์อ้างอิงเสียงและข้อความอ้างอิงเพื่อให้เสียงคงเส้นคงวา
+
+โหมดบังคับใช้เฉพาะ F5-TTS-Thai (ไม่ fallback):
+- ตั้งค่าใน `.env`: `TTS_STRICT_ONLY=true`
+- เมื่อเปิดโหมดนี้ หาก F5-TTS ใช้งานไม่ได้หรือเรียก API ไม่ถูกต้อง ระบบจะยกเลิกทันทีและไม่สลับไปใช้ Edge-TTS หรือเสียงเงียบ
+- ค่าเริ่มต้นคือ `false` (อนุญาตให้ fallback เพื่อความสะดวกในการทดสอบ)
 
 ตัวแปรที่เกี่ยวข้องใน `.env` (ตัวอย่าง):
 - `TTS_ENGINE=f5_tts_thai`
@@ -81,6 +90,7 @@ pip install -r requirements.txt
 - `F5_TTS_STEPS=32` (จำนวนสเต็ป)
 - `F5_TTS_CFG_STRENGTH=2.0` (ความแรงของ CFG)
 - `F5_TTS_SAMPLE_RATE=24000` (ค่าเริ่มต้นของเสียงที่สังเคราะห์)
+ - `TTS_STRICT_ONLY=true|false` (เปิด/ปิดโหมดไม่ fallback)
 
 ## การรัน (โหมดสาธิต)
 ```

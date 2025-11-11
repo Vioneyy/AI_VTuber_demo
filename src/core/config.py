@@ -83,6 +83,7 @@ class TTSConfig:
 @dataclass
 class VTubeStudioConfig:
     """การตั้งค่า VTube Studio"""
+    enabled: bool = os.getenv("VTS_ENABLED", "true").lower() == "true"
     websocket_url: str = os.getenv("VTS_WS_URL", "ws://localhost:8001")
     plugin_name: str = os.getenv("VTS_PLUGIN_NAME", "Jeed_AI_VTuber")
     plugin_token: str = os.getenv("VTS_PLUGIN_TOKEN", "")
@@ -101,6 +102,7 @@ class VTubeStudioConfig:
 @dataclass
 class DiscordConfig:
     """การตั้งค่า Discord Bot"""
+    enabled: bool = os.getenv("DISCORD_ENABLED", "true").lower() == "true"
     token: str = os.getenv("DISCORD_BOT_TOKEN", "")
     command_prefix: str = "!"
     intents_voice: bool = True
@@ -227,8 +229,10 @@ class Config:
         if not self.llm.api_key:
             errors.append("❌ ไม่พบ OPENAI_API_KEY")
             
-        if not self.discord.token:
-            errors.append("❌ ไม่พบ DISCORD_BOT_TOKEN")
+        # Discord token required only when Discord is enabled
+        if getattr(self.discord, "enabled", True):
+            if not self.discord.token:
+                errors.append("❌ ไม่พบ DISCORD_BOT_TOKEN (เปิดใช้งาน Discord)\n   - หากไม่ต้องการใช้ Discord ให้ตั้งค่า DISCORD_ENABLED=false ใน .env")
         
         # Warning checks
         if not Path(self.tts.reference_wav).exists():
@@ -258,6 +262,16 @@ class Config:
         print("\n" + "="*50)
         print("🎮 Jeed AI VTuber Configuration")
         print("="*50)
+        try:
+            print(f"LLM Model: {self.llm.model}")
+            print(f"TTS Engine: {self.tts.engine}")
+            print(f"VTube Studio: {'Enabled' if getattr(self.vtube, 'enabled', True) else 'Disabled'}")
+            print(f"Discord Bot: {'Enabled' if getattr(self.discord, 'enabled', True) else 'Disabled'}")
+            print(f"YouTube Live: {'Enabled' if getattr(self.youtube, 'enabled', False) else 'Disabled'}")
+            print(f"GPU Acceleration: {self.system.use_gpu}")
+        except Exception:
+            pass
+        print("="*50 + "\n")
 
     # ===== Compatibility aliases (uppercase names expected by main.py) =====
     @property
@@ -366,13 +380,15 @@ class Config:
     @property
     def WHISPER_CPP_NGL(self) -> int:
         return self.stt.n_gpu_layers
-        print(f"LLM Model: {self.llm.model}")
-        print(f"TTS Engine: {self.tts.engine}")
-        print(f"VTube Studio: {self.vtube.model_name}")
-        print(f"Discord Bot: {'Enabled' if self.discord.token else 'Disabled'}")
-        print(f"YouTube Live: {'Enabled' if self.youtube.enabled else 'Disabled'}")
-        print(f"GPU Acceleration: {self.system.use_gpu}")
-        print("="*50 + "\n")
+
+    # Toggle aliases
+    @property
+    def DISCORD_ENABLED(self) -> bool:
+        return getattr(self.discord, "enabled", True)
+
+    @property
+    def VTS_ENABLED(self) -> bool:
+        return getattr(self.vtube, "enabled", True)
 
 # Global config instance
 config = Config()

@@ -10,11 +10,12 @@ from pathlib import Path
 import io
 import os
 import numpy as np
+import pytchat
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.queue_manager import SmartQueueManager, QueueItem
+from core.queue_manager import SmartQueueManager, QueueItem, Priority
 from adapters.discord_bot import DiscordBotAdapter
 from audio.hybrid_stt import HybridSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
 from audio.f5_tts_handler import F5TTSHandler
@@ -56,6 +57,9 @@ class JeedAIVTuber:
         self.tts_engine = None  # TTS engine
         self.llm_processor = None  # LLM processor
         self.stt_handler = None  # STT engine (Faster-Whisper)
+        # YouTube Live
+        self.youtube_task = None
+        self.youtube_chat = None
         
         # Tasks
         self.tasks = []
@@ -89,8 +93,23 @@ class JeedAIVTuber:
         # Initialize STT Engine (Faster-Whisper)
         logger.info("📦 Loading STT engine (Faster-Whisper)...")
         try:
-            self.stt_handler = STTHandler()
+            self.stt_handler = STTHandler(
+                model_size=self.config.WHISPER_MODEL,
+                device=self.config.WHISPER_DEVICE,
+                language=self.config.WHISPER_LANG
+            )
             logger.info("✅ STT handler loaded")
+            # แสดงสถานะ STT ปัจจุบันเพื่อการวินิจฉัย
+            try:
+                stt_status = getattr(self.stt_handler, 'get_status', lambda: None)()
+                if stt_status:
+                    logger.info(
+                        f"🔍 STT status: backend={stt_status.get('backend')} "
+                        f"device={stt_status.get('device')} compute_type={stt_status.get('compute_type')} "
+                        f"model={stt_status.get('model_size')} lang={stt_status.get('language')}"
+                    )
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"⚠️  STT handler failed to load: {e}")
             self.stt_handler = None
@@ -108,6 +127,13 @@ class JeedAIVTuber:
 
             self.tts_engine = F5TTSHandler(reference_wav=ref_wav)
             logger.info("✅ TTS handler loaded")
+            # Warm-up เพื่อลดดีเลย์ครั้งแรกของ TTS (โหลดโมเดล/คอมไพล์กราฟ)
+            try:
+                logger.info("🔥 Warming up TTS engine...")
+                _audio, _sr = await self.tts_engine.generate_speech("สวัสดีค่ะ", output_path=None)
+                logger.info("✅ TTS warm-up done")
+            except Exception as warm_e:
+                logger.warning(f"⚠️  TTS warm-up skipped: {warm_e}")
         except Exception as e:
             logger.warning(f"⚠️  TTS handler failed to load: {e}")
             self.tts_engine = None
@@ -130,38 +156,45 @@ class JeedAIVTuber:
             logger.error(f"❌ Failed to initialize LLM ResponseGenerator: {e}")
             self.llm_processor = None
         
-        # Initialize VTube Studio Controller (updated import path)
-        logger.info("📡 เชื่อมต่อ VTube Studio...")
-        try:
-            from adapters.vts.vts_controller import VTSController
-            # ใช้ค่า plugin_name จาก Config หากมี
-            self.vts_client = VTSController(plugin_name=self.config.VTS_PLUGIN_NAME)
-            await self.vts_client.connect()
-            logger.info("✅ VTube Studio พร้อมใช้งาน")
-        except Exception as e:
-            logger.warning(f"⚠️  VTube Studio connection failed: {e}")
-            logger.warning("⚠️  Continuing without VTS")
+        # Initialize VTube Studio Controller ตามสวิตช์
+        if self.config.VTS_ENABLED:
+            logger.info("📡 เชื่อมต่อ VTube Studio...")
+            try:
+                from adapters.vts.vts_controller import VTSController
+                # ใช้ค่า plugin_name จาก Config หากมี
+                self.vts_client = VTSController(plugin_name=self.config.VTS_PLUGIN_NAME)
+                await self.vts_client.connect()
+                logger.info("✅ VTube Studio พร้อมใช้งาน")
+            except Exception as e:
+                logger.warning(f"⚠️  VTube Studio connection failed: {e}")
+                logger.warning("⚠️  Continuing without VTS")
+                self.vts_client = None
+        else:
+            logger.info("⚠️ ปิดใช้งาน VTS ตาม .env (VTS_ENABLED=false)")
             self.vts_client = None
         
-        # Initialize Discord Bot
-        logger.info("🤖 เริ่ม Discord Bot...")
-        self.discord_bot = DiscordBotAdapter(
-            token=self.config.DISCORD_BOT_TOKEN,
-            admin_ids=self.config.ADMIN_USER_IDS
-        )
-        
-        # Set callbacks
-        self.discord_bot.on_voice_input = self._handle_voice_input
-        self.discord_bot.on_text_command = self._handle_text_command
-        # ส่งสถานะระบบภายนอกให้ Discord Bot สำหรับรายงานในห้อง
-        try:
-            self.discord_bot.update_external_status(
-                vts_connected=(self.vts_client is not None),
-                tts_ready=(self.tts_engine is not None),
-                queue_ready=(self.queue_manager is not None)
+        # Initialize Discord Bot ตามสวิตช์
+        if self.config.DISCORD_ENABLED:
+            logger.info("🤖 เริ่ม Discord Bot...")
+            self.discord_bot = DiscordBotAdapter(
+                token=self.config.DISCORD_BOT_TOKEN,
+                admin_ids=self.config.ADMIN_USER_IDS
             )
-        except Exception:
-            pass
+            # Set callbacks
+            self.discord_bot.on_voice_input = self._handle_voice_input
+            self.discord_bot.on_text_command = self._handle_text_command
+            # ส่งสถานะระบบภายนอกให้ Discord Bot สำหรับรายงานในห้อง
+            try:
+                self.discord_bot.update_external_status(
+                    vts_connected=(self.vts_client is not None),
+                    tts_ready=(self.tts_engine is not None),
+                    queue_ready=(self.queue_manager is not None)
+                )
+            except Exception:
+                pass
+        else:
+            logger.info("⚠️ ปิดใช้งาน Discord ตาม .env (DISCORD_ENABLED=false)")
+            self.discord_bot = None
         
         # Print config
         self.config.print_config()
@@ -169,7 +202,7 @@ class JeedAIVTuber:
         logger.info("=" * 60)
         logger.info("✅ Jeed AI VTuber พร้อมแล้ว!")
         logger.info("=" * 60)
-    
+
     async def start(self):
         """Start the application"""
         try:
@@ -177,12 +210,13 @@ class JeedAIVTuber:
             
             self.running = True
             
-            # Start Discord Bot
-            bot_task = asyncio.create_task(
-                self._run_discord_bot_supervisor(),
-                name="discord_bot"
-            )
-            self.tasks.append(bot_task)
+            # Start Discord Bot (ถ้าเปิดใช้งาน)
+            if self.discord_bot and self.config.DISCORD_ENABLED:
+                bot_task = asyncio.create_task(
+                    self._run_discord_bot_supervisor(),
+                    name="discord_bot"
+                )
+                self.tasks.append(bot_task)
             
             # Start Queue Processor
             logger.info("=" * 60)
@@ -201,6 +235,21 @@ class JeedAIVTuber:
                 )
                 self.tasks.append(animation_task)
                 logger.info("🎬 เริ่ม Animation Loop")
+
+            # Start YouTube Live chat reader if enabled
+            try:
+                yt_cfg = getattr(self.config, 'youtube', None)
+                if yt_cfg and getattr(yt_cfg, 'stream_id', ''):
+                    self.youtube_task = asyncio.create_task(
+                        self._youtube_live_loop(),
+                        name="youtube_live"
+                    )
+                    self.tasks.append(self.youtube_task)
+                    logger.info(f"📺 เริ่มอ่านคอมเมนต์ YouTube Live: {yt_cfg.stream_id}")
+                else:
+                    logger.info("ℹ️ YouTube Live ไม่ได้ตั้งค่า stream_id — จะไม่เริ่มลูป YouTube")
+            except Exception as e:
+                logger.warning(f"⚠️ ไม่สามารถเริ่ม YouTube Live ได้: {e}")
             
             # Wait for all tasks
             await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -240,6 +289,14 @@ class JeedAIVTuber:
             except Exception as e:
                 logger.debug(f"Ignoring VTS disconnect error: {e}")
 
+        # Stop YouTube Live
+        try:
+            if self.youtube_chat:
+                logger.info("🛑 ปิดการเชื่อมต่อ YouTube Live")
+                self.youtube_chat.terminate()
+        except Exception:
+            pass
+
         # Stop Queue Manager
         if self.queue_manager:
             try:
@@ -263,6 +320,11 @@ class JeedAIVTuber:
 
     async def _run_discord_bot_supervisor(self):
         """รัน Discord bot และรีสตาร์ทอัตโนมัติเมื่อหลุดด้วยโค้ด 4006/ข้อผิดพลาดชั่วคราว"""
+        # หากไม่มี token ให้ข้ามการเริ่ม Discord เพื่อหลีกเลี่ยงการค้างระหว่างทดสอบ/ออฟไลน์
+        if not (self.config.DISCORD_BOT_TOKEN and self.config.DISCORD_BOT_TOKEN.strip()):
+            logger.info("⚠️ ข้ามการเริ่ม Discord Bot: ไม่พบ DISCORD_BOT_TOKEN")
+            return
+
         while self.running and not self._stopping:
             try:
                 await self.discord_bot.start()
@@ -313,9 +375,10 @@ class JeedAIVTuber:
         """Handle text command"""
         await self.queue_manager.add_to_queue(
             content=content,
-            source="text",
+            source="voice",  # ให้ความสำคัญเทียบเท่าเสียง เพื่อความเร็วตอบใน Discord
             user_id=user_id,
-            user_name="User"
+            user_name="User",
+            priority=Priority.VOICE
         )
     
     async def _process_queue_item(self, item: QueueItem):
@@ -374,16 +437,35 @@ class JeedAIVTuber:
             # 4) Play audio in Discord
             sample_rate = tts_sample_rate or core_config.tts.sample_rate
             if self.discord_bot and self.discord_bot.voice_client:
-                if self.vts_client:
-                    try:
-                        # ใช้ start_speaking เพื่อกระตุ้น lip sync ตามข้อความจริง
-                        await self.vts_client.start_speaking(response_text)
-                    except Exception:
-                        # fallback เผื่อเวอร์ชันเก่ายังไม่มีเมธอด
+                # เขียนไฟล์ WAV ชั่วคราวสำหรับ lip sync
+                temp_dir = Path('temp/recordings/discord_out')
+                try:
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+                temp_wav = temp_dir / 'lipsync_tmp.wav'
+                try:
+                    import wave as _wave
+                    # แปลง float32 [-1,1] -> PCM16
+                    _pcm = np.clip(audio_data, -1.0, 1.0)
+                    _pcm16 = (_pcm * 32767.0).astype(np.int16)
+                    with _wave.open(str(temp_wav), 'wb') as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(int(sample_rate))
+                        wf.writeframes(_pcm16.tobytes())
+                    # เริ่ม lip sync จากไฟล์เสียงจริงแบบ async
+                    if self.vts_client:
                         try:
-                            await self.vts_client.set_talking(True)
+                            await self.vts_client.start_lip_sync_from_file(str(temp_wav))
                         except Exception:
-                            pass
+                            # fallback: ตั้งสถานะกำลังพูด
+                            try:
+                                await self.vts_client.set_talking(True)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug(f"Lip sync WAV prepare failed: {e}")
 
                 await self.discord_bot.play_audio(audio_data, sample_rate)
 
@@ -402,6 +484,46 @@ class JeedAIVTuber:
 
         except Exception as e:
             logger.error(f"❌ Error processing queue item: {e}", exc_info=True)
+
+    async def _youtube_live_loop(self):
+        """อ่านคอมเมนต์ YouTube Live แล้วส่งเข้าคิว"""
+        try:
+            yt_cfg = getattr(self.config, 'youtube', None)
+            if not yt_cfg or not getattr(yt_cfg, 'stream_id', ''):
+                logger.info("ℹ️ ไม่มีค่า YouTube stream_id — ข้ามลูป YouTube")
+                return
+
+            # สร้าง client ของ YouTube Live
+            self.youtube_chat = pytchat.create(video_id=yt_cfg.stream_id)
+            logger.info(f"✅ เชื่อมต่อ YouTube Live: {yt_cfg.stream_id}")
+
+            # interval การอ่านคอมเมนต์
+            interval = float(getattr(yt_cfg, 'check_interval', 5.0))
+
+            while self.running and self.youtube_chat.is_alive():
+                try:
+                    items = self.youtube_chat.get().sync_items()
+                    for c in items:
+                        msg = c.message
+                        user_id = c.author.channelId
+                        user_name = c.author.name
+                        # เพิ่มเข้าคิวด้วย priority YouTube
+                        await self.queue_manager.add_to_queue(
+                            content=msg,
+                            source="youtube",
+                            user_id=str(user_id),
+                            user_name=user_name,
+                            priority=Priority.YOUTUBE
+                        )
+                    await asyncio.sleep(interval)
+                except Exception as e:
+                    logger.warning(f"⚠️ YouTube Chat Error: {e}")
+                    await asyncio.sleep(max(3.0, interval))
+
+            logger.info("👋 หยุดอ่านคอมเมนต์ YouTube Live")
+
+        except Exception as e:
+            logger.error(f"❌ YouTube Live loop error: {e}", exc_info=True)
     
     async def _vts_animation_loop(self):
         """VTube Studio animation loop"""

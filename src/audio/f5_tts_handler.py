@@ -16,7 +16,11 @@ class F5TTSHandler:
 
     def __init__(self, reference_wav: Optional[str] = None, device: Optional[str] = None):
         try:
-            from src.adapters.tts.f5_tts_thai import F5TTSThai
+            # รองรับทั้งกรณีรันแบบแพ็กเกจ (root on sys.path) และรันจากโฟลเดอร์ src โดยตรง
+            try:
+                from src.adapters.tts.f5_tts_thai import F5TTSThai
+            except ImportError:
+                from adapters.tts.f5_tts_thai import F5TTSThai
             # หาก .env มี TTS_REFERENCE_WAV จะอ่านโดย engine ภายในอยู่แล้ว
             self.engine = F5TTSThai(device=device, reference_wav=reference_wav)
             logger.info("✅ F5TTSHandler initialized")

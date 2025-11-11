@@ -61,10 +61,12 @@ class LLMHandler:
             # หมายเหตุ: ภาษาไทยมี tokenization ละเอียดกว่า ทำให้จำนวนโทเค็นสูงขึ้นต่อความยาวข้อความ
             # จึงขยายเพดานและปรับสูตรให้ปลอดภัยขึ้น แต่ยังไม่เกิน config.llm.max_tokens
             approx_len = len(user_message)
-            dynamic_max = min(
-                config.llm.max_tokens,
-                max(64, min(128, 32 + approx_len // 3))
-            )
+            # ปรับสูตรให้เคารพเพดานจาก config.llm.max_tokens เต็มที่ และกันสำรองสำหรับปิดประโยค
+            # แนวคิด: ให้ base สูงขึ้นเล็กน้อย + buffer เพื่อเผื่อจบ 2–3 ประโยคได้ไม่ตัดกลางคัน
+            base = 64  # เพิ่ม base เพื่อให้มีงบโทเค็นพอสำหรับ 2 ประโยคแม้ข้อความสั้น
+            buffer = 24  # กันสำรองเพื่อปิดประโยค
+            scale = approx_len // 2  # ภาษาไทยมี tokenization ถี่ จึงใช้สเกลสูงขึ้น
+            dynamic_max = max(64, min(config.llm.max_tokens, base + scale + buffer))
             
             # เรียก API
             response = await asyncio.wait_for(

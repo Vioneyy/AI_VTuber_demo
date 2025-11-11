@@ -505,10 +505,12 @@ class DiscordBotAdapter:
             })
             # ปรับ presence เล็กน้อยตามสถานะ
             try:
-        status_txt = f"🎤 Voice {'ON' if self.is_recording else 'OFF'} | TTS {'OK' if tts_ready else 'X'}"
-                asyncio.create_task(self.bot.change_presence(
-                    activity=discord.Activity(type=discord.ActivityType.listening, name=status_txt)
-                ))
+                # เรียก change_presence เฉพาะเมื่อ websocket พร้อมแล้ว เพื่อหลีกเลี่ยง Task exception
+                if getattr(self.bot, 'ws', None) is not None:
+                    status_txt = f"🎤 Voice {'ON' if self.is_recording else 'OFF'} | TTS {'OK' if tts_ready else 'X'}"
+                    asyncio.create_task(self.bot.change_presence(
+                        activity=discord.Activity(type=discord.ActivityType.listening, name=status_txt)
+                    ))
             except Exception:
                 pass
         except Exception as e:

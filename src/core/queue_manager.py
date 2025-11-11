@@ -23,10 +23,10 @@ class Priority(IntEnum):
 class QueueItem:
     """รายการในคิว"""
     priority: int
-    timestamp: float = field(compare=False)
     source: str = field(compare=False)
     content: str = field(compare=False)
     user_id: str = field(compare=False)
+    timestamp: float = field(default_factory=time.time, compare=False)
     user_name: str = field(compare=False, default="Unknown")
     metadata: dict = field(default_factory=dict, compare=False)
 

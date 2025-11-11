@@ -42,5 +42,9 @@ class VTSController:
         """หยุดพูด และปิดการขยับปาก"""
         await self._controller.stop_speaking()
 
+    async def start_lip_sync_from_file(self, audio_file_path: str):
+        """เริ่ม lip sync จากไฟล์เสียง (WAV) ผ่านคอนโทรลเลอร์ภายใน"""
+        await self._controller.start_lip_sync_from_file(audio_file_path)
+
     async def disconnect(self):
         await self._controller.disconnect()
