@@ -1,3 +1,0 @@
-rvc_models/*.pth filter=lfs diff=lfs merge=lfs -text
-logs/*.csv filter=lfs diff=lfs merge=lfs -text
-rvc_models/*.index filter=lfs diff=lfs merge=lfs -text

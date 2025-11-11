@@ -113,17 +113,7 @@ class JeedAIVTuber:
             self.tts_engine = None
             logger.warning("⚠️  Continuing without TTS")
 
-        # Ensure RVC WebUI server is running if enabled
-        try:
-            import os
-            if os.getenv("RVC_ENABLED", "false").lower() == "true":
-                from adapters.rvc.rvc_server_launcher import ensure_server_running
-                if ensure_server_running():
-                    logger.info("✅ RVC WebUI พร้อมใช้งาน")
-                else:
-                    logger.info("ℹ️ ไม่ได้เปิด RVC WebUI อัตโนมัติ (ตรวจสอบ .env:RVC_WEBUI_DIR)")
-        except Exception as e:
-            logger.warning(f"⚠️ เปิด RVC WebUI อัตโนมัติผิดพลาด: {e}")
+        # RVC ถูกปิดใช้งาน — รันแบบ TTS-only เพื่อความเร็ว
 
         # Initialize LLM Response Generator
         logger.info("🧠 Initializing LLM ResponseGenerator...")
@@ -379,18 +369,7 @@ class JeedAIVTuber:
             if audio_data.dtype != np.float32:
                 audio_data = audio_data.astype(np.float32)
 
-            # 3.5) Optional: ส่งเข้า RVC Server เพื่อแปลงเสียงตามโมเดลที่ระบุใน .env
-            try:
-                import os
-                from adapters.rvc.rvc_client import RVCClient, is_enabled as rvc_enabled
-                if rvc_enabled():
-                    logger.info("🎚️ RVC enabled — converting voice via external server...")
-                    rvc = RVCClient()
-                    audio_data, tts_sample_rate = rvc.convert(audio_data, tts_sample_rate or core_config.tts.sample_rate)
-                else:
-                    logger.debug("RVC disabled — using raw TTS output")
-            except Exception as rvc_e:
-                logger.warning(f"⚠️ RVC step error: {rvc_e}")
+            # ใช้ผลลัพธ์จาก TTS โดยตรงเพื่อให้ตอบสนองเร็ว
 
             # 4) Play audio in Discord
             sample_rate = tts_sample_rate or core_config.tts.sample_rate

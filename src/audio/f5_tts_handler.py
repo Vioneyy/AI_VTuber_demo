@@ -16,7 +16,7 @@ class F5TTSHandler:
 
     def __init__(self, reference_wav: Optional[str] = None, device: Optional[str] = None):
         try:
-            from adapters.tts.f5_tts_thai import F5TTSThai
+            from src.adapters.tts.f5_tts_thai import F5TTSThai
             # หาก .env มี TTS_REFERENCE_WAV จะอ่านโดย engine ภายในอยู่แล้ว
             self.engine = F5TTSThai(device=device, reference_wav=reference_wav)
             logger.info("✅ F5TTSHandler initialized")
@@ -24,7 +24,7 @@ class F5TTSHandler:
             logger.error(f"❌ Failed to initialize F5TTSHandler: {e}")
             raise
 
-    async def generate_speech(self, text: str) -> Tuple[Optional[np.ndarray], Optional[int]]:
+    async def generate_speech(self, text: str, output_path: Optional[str] = None) -> Tuple[Optional[np.ndarray], Optional[int]]:
         """
         สังเคราะห์เสียงด้วย F5-TTS-Thai และแปลงเป็น numpy array
 
@@ -55,6 +55,14 @@ class F5TTSHandler:
             if audio.size == 0 or np.max(np.abs(audio)) < 1e-4:
                 logger.error("❌ Generated audio is SILENT!")
                 return None, None
+
+            # หากระบุ output_path ให้บันทึก wav bytes ลงไฟล์
+            try:
+                if output_path:
+                    with open(output_path, 'wb') as wf:
+                        wf.write(wav_bytes)
+            except Exception as write_e:
+                logger.warning(f"⚠️ ไม่สามารถบันทึกไฟล์ TTS: {write_e}")
 
             return audio, int(sr)
         except Exception as e:

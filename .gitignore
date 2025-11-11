@@ -1,40 +1,23 @@
-# Python
+.venv/
+.env
+*.env
+*.log
+vtuber.log
+logs/
+temp/
+temp_ref_prepared.wav
+temp_silent_ref.wav
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# IDE/Editor
-.vscode/
+.DS_Store
 .idea/
-
-# Environment variables
-.env
-.env.backup
-
-# Large models and binaries (skip huge files; use LFS if needed)
-models/*.bin
-models/*.pth
-models/*.onnx
-models/*.pt
-models/*.ckpt
-tools/ffmpeg/
-
-
-
-# Outputs & logs
-output/
-logs/
-temp/recordings/
-
-# OS/Tooling
-*.log
+.vscode/
+*.zip
 *.tmp
-*.cache
-*.DS_Store
+
+# Keep reference_audio tracked
+!reference_audio/
+
+# Exclude heavy binaries and builds
+tools/ffmpeg/ffmpeg-8.0-essentials_build/
+models/
