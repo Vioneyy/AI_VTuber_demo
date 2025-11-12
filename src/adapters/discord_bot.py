@@ -201,6 +201,11 @@ class DiscordBotAdapter:
 
                 s = state.lower()
                 if s == 'on':
+                    # หากระบบปิด STT ไว้ ให้บล็อคการรับเสียงและแนะนำให้ใช้ !ask
+                    stt_enabled = bool(getattr(config, 'DISCORD_VOICE_STT_ENABLED', False)) or bool(getattr(config.discord, 'stt_enabled', False))
+                    if not stt_enabled:
+                        await ctx.send("🔇 ปิด STT ตามการตั้งค่า (.env) — จะไม่รับเสียงนะคะ ใช้ !ask เพื่อถามด้วยข้อความแทน")
+                        return
                     self.is_recording = True
                     # เริ่มฟังใหม่เพื่อเคลียร์บัฟเฟอร์และตั้ง callback
                     await self._start_listening()
@@ -273,6 +278,12 @@ class DiscordBotAdapter:
         """เริ่มฟังเสียง"""
         if not self.voice_client:
             return
+        # หาก STT ถูกปิดใช้งาน ให้ไม่เริ่มรับเสียงเพื่อหลีกเลี่ยงการใช้ทรัพยากร
+        stt_enabled = bool(getattr(config, 'DISCORD_VOICE_STT_ENABLED', False)) or bool(getattr(config.discord, 'stt_enabled', False))
+        if not stt_enabled:
+            logger.info("🔇 ข้ามการเริ่มฟังเสียง: STT ถูกปิดใช้งาน")
+            self.is_recording = False
+            return
         
         self.is_recording = True
         self._clear_audio_buffers()
@@ -339,6 +350,10 @@ class DiscordBotAdapter:
     async def _process_buffered_audio(self, user, user_id: str):
         """Process audio ที่ buffer ไว้"""
         try:
+            # หาก STT ถูกปิดใช้งาน ให้ไม่ประมวลผลเสียงใด ๆ
+            stt_enabled = bool(getattr(config, 'DISCORD_VOICE_STT_ENABLED', False)) or bool(getattr(config.discord, 'stt_enabled', False))
+            if not stt_enabled:
+                return
             # ป้องกันการ process ซ้ำ
             if user_id in self.processing_users:
                 return

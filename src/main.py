@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core.queue_manager import SmartQueueManager, QueueItem, Priority
 from adapters.discord_bot import DiscordBotAdapter
-from audio.hybrid_stt import HybridSTT as STTHandler  # ใช้ Faster-Whisper เพื่อความเร็วและความเสถียร
+# หมายเหตุ: STT จะ lazy-import ภายใน initialize() เฉพาะเมื่อเปิดใช้งาน เพื่อลดเวลาเริ่มต้นระบบ
 from audio.f5_tts_handler import F5TTSHandler
 from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
@@ -90,30 +90,36 @@ class JeedAIVTuber:
         )
         logger.info("✅ Queue Manager ready")
 
-        # Initialize STT Engine (Faster-Whisper)
-        logger.info("📦 Loading STT engine (Faster-Whisper)...")
-        try:
-            self.stt_handler = STTHandler(
-                model_size=self.config.WHISPER_MODEL,
-                device=self.config.WHISPER_DEVICE,
-                language=self.config.WHISPER_LANG
-            )
-            logger.info("✅ STT handler loaded")
-            # แสดงสถานะ STT ปัจจุบันเพื่อการวินิจฉัย
+        # Initialize STT Engine (Faster-Whisper) — only when enabled
+        if self.config.DISCORD_VOICE_STT_ENABLED:
+            logger.info("📦 Loading STT engine (Faster-Whisper)...")
             try:
-                stt_status = getattr(self.stt_handler, 'get_status', lambda: None)()
-                if stt_status:
-                    logger.info(
-                        f"🔍 STT status: backend={stt_status.get('backend')} "
-                        f"device={stt_status.get('device')} compute_type={stt_status.get('compute_type')} "
-                        f"model={stt_status.get('model_size')} lang={stt_status.get('language')}"
-                    )
-            except Exception:
-                pass
-        except Exception as e:
-            logger.warning(f"⚠️  STT handler failed to load: {e}")
+                # Lazy import เพื่อลดเวลาเริ่มต้น
+                from audio.hybrid_stt import HybridSTT as STTHandler
+                self.stt_handler = STTHandler(
+                    model_size=self.config.WHISPER_MODEL,
+                    device=self.config.WHISPER_DEVICE,
+                    language=self.config.WHISPER_LANG
+                )
+                logger.info("✅ STT handler loaded")
+                # แสดงสถานะ STT ปัจจุบันเพื่อการวินิจฉัย
+                try:
+                    stt_status = getattr(self.stt_handler, 'get_status', lambda: None)()
+                    if stt_status:
+                        logger.info(
+                            f"🔍 STT status: backend={stt_status.get('backend')} "
+                            f"device={stt_status.get('device')} compute_type={stt_status.get('compute_type')} "
+                            f"model={stt_status.get('model_size')} lang={stt_status.get('language')}"
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"⚠️  STT handler failed to load: {e}")
+                self.stt_handler = None
+                logger.warning("⚠️  Continuing without STT")
+        else:
+            logger.info("🔇 ปิดใช้งาน STT ตาม .env (DISCORD_VOICE_STT_ENABLED=false)")
             self.stt_handler = None
-            logger.warning("⚠️  Continuing without STT")
         
         # Initialize TTS Engine (F5-TTS-Thai)
         logger.info("📦 Loading TTS engine (F5-TTS-Thai)...")
