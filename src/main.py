@@ -23,6 +23,7 @@ from core.response_generator import get_response_generator
 from personality.jeed_persona import jeed_persona
 from llm.chatgpt_client import ChatGPTClient
 from core.config import config as core_config
+from core.motion_analyzer import motion_analyzer
 
 # Setup logging
 # Configure logging with UTF-8 safe console handler
@@ -391,8 +392,10 @@ class JeedAIVTuber:
         """รัน lip sync เป็น concurrent task (ไม่รอ)"""
         try:
             if self.vts_client:
+                # ตั้งสถานะกำลังพูด เพื่อให้โมเดลเข้าสู่โหมด SPEAKING
                 await self.vts_client.set_talking(True)
-                await self.vts_client.start_lip_sync_from_file(audio_file)
+                # เริ่ม lip sync แบบไม่บล็อก เพื่อไม่ให้แอปค้าง
+                asyncio.create_task(self.vts_client.start_lip_sync_from_file(audio_file))
         except Exception as e:
             logger.debug(f"Concurrent lip sync error: {e}")
     
@@ -412,6 +415,10 @@ class JeedAIVTuber:
                 source=item.source,
                 repeat_question=(item.source == "youtube")
             )
+            # ✅ เพิ่มบรรทัดนี้ (3 บรรทัด)
+            motion_cmd = motion_analyzer.analyze(response_text)
+            if self.vts_client:
+                asyncio.create_task(self.vts_client.execute_motion_command(motion_cmd))
 
             if not response_text:
                 logger.info(f"🚫 No response generated (reason: {rejection_reason})")
@@ -480,9 +487,11 @@ class JeedAIVTuber:
                 # ✅ เล่นเสียง (non-blocking แล้ว)
                 await self.discord_bot.play_audio(audio_data, sample_rate)
 
+                # ปิดโหมดกำลังพูด และรีเซ็ตไป idle อย่างชัดเจน
                 if self.vts_client:
                     try:
-                        await self.vts_client.stop_speaking()
+                        await self.vts_client.set_talking(False)
+                        await self.vts_client.update_idle_motion()
                     except Exception:
                         pass
                 logger.info("✅ Audio played successfully")

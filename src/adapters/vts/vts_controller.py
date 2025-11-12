@@ -48,3 +48,7 @@ class VTSController:
 
     async def disconnect(self):
         await self._controller.disconnect()
+
+    async def execute_motion_command(self, motion_cmd):
+        """ส่งต่อคำสั่ง motion ไปยังคอนโทรลเลอร์ภายใน"""
+        await self._controller.execute_motion_command(motion_cmd)

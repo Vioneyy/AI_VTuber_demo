@@ -8,6 +8,7 @@ import websockets
 import json
 import random
 import time
+import logging
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 from enum import Enum
@@ -16,6 +17,9 @@ import sys
 sys.path.append('../..')
 from core.config import config
 from personality.jeed_persona import Emotion, JeedPersona
+
+# ใช้ logger แทนการ print ในบางกรณี (debug/non-critical)
+logger = logging.getLogger(__name__)
 
 class AnimationState(Enum):
     """สถานะการเคลื่อนไหว"""
@@ -229,6 +233,47 @@ class VTubeStudioController:
                     
         except Exception as e:
             print(f"❌ Get Parameters Error: {e}")
+
+    # ✅ เพิ่ม _send_parameters() ตรงนี้ ก่อน animation loop
+    async def _send_parameters(self, parameters: Dict[str, float]):
+        """ส่งค่าพารามิเตอร์ไปยัง VTS (ปรับ: ไม่ block)"""
+        if not self.authenticated or not self.model_loaded or not self.ws:
+            return
+        
+        try:
+            valid_params = []
+            for param_name, value in parameters.items():
+                if param_name in self.available_parameters:
+                    param_info = self.available_parameters[param_name]
+                    clamped_value = max(param_info['min'], min(param_info['max'], value))
+                    valid_params.append({
+                        "id": param_name,
+                        "value": clamped_value
+                    })
+            
+            if not valid_params:
+                return
+            
+            request = {
+                "apiName": "VTubeStudioPublicAPI",
+                "apiVersion": "1.0",
+                "requestID": "inject_params",
+                "messageType": "InjectParameterDataRequest",
+                "data": {
+                    "parameterValues": valid_params
+                }
+            }
+            
+            # ✅ ปรับ: ส่งด้วย timeout สั้นเพื่อไม่ block
+            try:
+                await asyncio.wait_for(self.ws.send(json.dumps(request)), timeout=0.5)
+            except asyncio.TimeoutError:
+                logger.debug("⚠️ WebSocket send timeout (non-critical)")
+            except Exception:
+                pass
+                
+        except Exception:
+            pass
     
     def _generate_random_movement(self) -> Dict[str, float]:
         """สร้างจุดเป้าหมายแบบสุ่ม"""
@@ -246,8 +291,7 @@ class VTubeStudioController:
             'EyeLeftX': random.uniform(-1, 1),
             'EyeLeftY': random.uniform(-0.7, 0.7),
             'EyeRightX': random.uniform(-1, 1),
-            'EyeRightY': random.uniform(-0.7, 0.7),
-            'MouthOpen': 0.0
+            'EyeRightY': random.uniform(-0.7, 0.7)
         }
         
         return movements
@@ -375,56 +419,209 @@ class VTubeStudioController:
                     await self.set_parameter_value('MouthOpen', 0.0, immediate=True)
                 except Exception:
                     pass
+async def execute_motion_command(self, motion_cmd) -> None:
+        """ทำการขยับตามคำสั่ง motion"""
+        from core.motion_commands import MotionType
 
-        # ยกเลิกงานเดิมถ้ามี แล้วสร้างใหม่
-        if self._lip_sync_task and not self._lip_sync_task.done():
-            self._lip_sync_running = False
-            try:
-                self._lip_sync_task.cancel()
-            except Exception:
-                pass
-        self._lip_sync_task = asyncio.create_task(_run())
-    
-    async def _send_parameters(self, parameters: Dict[str, float]):
-        """ส่งค่าพารามิเตอร์ไปยัง VTS (ปรับ: ไม่ block)"""
-        if not self.authenticated or not self.model_loaded or not self.ws:
+        if not self.authenticated or not self.model_loaded:
             return
-        
+
         try:
-            valid_params = []
-            for param_name, value in parameters.items():
-                if param_name in self.available_parameters:
-                    param_info = self.available_parameters[param_name]
-                    clamped_value = max(param_info['min'], min(param_info['max'], value))
-                    valid_params.append({
-                        "id": param_name,
-                        "value": clamped_value
-                    })
-            
-            if not valid_params:
-                return
-            
-            request = {
-                "apiName": "VTubeStudioPublicAPI",
-                "apiVersion": "1.0",
-                "requestID": "inject_params",
-                "messageType": "InjectParameterDataRequest",
-                "data": {
-                    "parameterValues": valid_params
-                }
+            if motion_cmd.motion_type == MotionType.THINKING:
+                await self._motion_thinking(motion_cmd)
+            elif motion_cmd.motion_type == MotionType.EXCITED:
+                await self._motion_excited(motion_cmd)
+            elif motion_cmd.motion_type == MotionType.CONFUSED:
+                await self._motion_confused(motion_cmd)
+            elif motion_cmd.motion_type == MotionType.HAPPY:
+                await self._motion_happy(motion_cmd)
+            elif motion_cmd.motion_type == MotionType.SAD:
+                await self._motion_sad(motion_cmd)
+            elif motion_cmd.motion_type == MotionType.ANGRY:
+                await self._motion_angry(motion_cmd)
+            else:
+                await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Motion execution error: {e}")
+
+async def _motion_thinking(self, motion_cmd) -> None:
+        """คิดอยู่ - หัวเงย ตาลง นิ่งๆ"""
+        try:
+            intensity = motion_cmd.intensity.value
+
+            targets = {
+                'FaceAngleX': 5.0 * intensity,
+                'FaceAngleY': 0.0,
+                'FaceAngleZ': 0.0,
+                'EyeLeftY': -0.3 * intensity,
+                'EyeRightY': -0.3 * intensity,
             }
-            
-            # ✅ ส่งด้วย timeout สั้นเพื่อไม่ block
-            try:
-                await asyncio.wait_for(self.ws.send(json.dumps(request)), timeout=0.5)
-            except asyncio.TimeoutError:
-                # non-critical: ข้ามเพื่อไม่บล็อก loop
-                pass
-            except Exception:
-                pass
-        except Exception:
-            # เงียบไว้เพื่อหลีกเลี่ยง spam
-            pass
+
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+
+            await asyncio.sleep(motion_cmd.duration)
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Thinking motion error: {e}")
+
+async def _motion_excited(self, motion_cmd) -> None:
+        """ตื่นเต้น - ยัน หัวเยื้อง เปะๆ"""
+        try:
+            import random
+            import numpy as np
+
+            intensity = motion_cmd.intensity.value
+
+            targets = {
+                'FaceAngleX': -8.0 * intensity,
+                'FaceAngleY': float(random.choice([-15, 15])) * intensity,
+                'FaceAngleZ': float(random.choice([-8, 8])) * intensity,
+                'EyeLeftX': float(np.random.uniform(-1, 1)),
+                'EyeLeftY': float(np.random.uniform(-0.5, 0.5)),
+                'EyeRightX': float(np.random.uniform(-1, 1)),
+                'EyeRightY': float(np.random.uniform(-0.5, 0.5)),
+            }
+
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+
+            elapsed = 0.0
+            while elapsed < motion_cmd.duration:
+                if motion_cmd.micro_twitch_enabled and elapsed % 0.5 < 0.25:
+                    twitch = self._generate_random_micro_twitch()
+                    for key in twitch:
+                        if key in self.smooth_values:
+                            current_target = self.smooth_values[key].target
+                            self.smooth_values[key].set_target(current_target + twitch[key] * 0.3)
+
+                await asyncio.sleep(0.05)
+                elapsed += 0.05
+
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Excited motion error: {e}")
+
+async def _motion_confused(self, motion_cmd) -> None:
+        """งงๆ - หัวเจียง ตากระพริบ"""
+        try:
+            import random
+
+            intensity = motion_cmd.intensity.value
+
+            targets = {
+                'FaceAngleX': float(random.uniform(-3, 3)),
+                'FaceAngleY': 15.0 * intensity,
+                'FaceAngleZ': 8.0 * intensity,
+                'EyeLeftX': -0.5,
+                'EyeLeftY': 0.2,
+                'EyeRightX': 0.5,
+                'EyeRightY': -0.2,
+            }
+
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+
+            elapsed = 0.0
+            while elapsed < motion_cmd.duration:
+                if elapsed % 0.3 < 0.15:
+                    self.smooth_values['EyeLeftY'].set_target(-0.5)
+                    self.smooth_values['EyeRightY'].set_target(-0.5)
+                else:
+                    self.smooth_values['EyeLeftY'].set_target(0.2)
+                    self.smooth_values['EyeRightY'].set_target(-0.2)
+
+                await asyncio.sleep(0.05)
+                elapsed += 0.05
+
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Confused motion error: {e}")
+
+async def _motion_happy(self, motion_cmd) -> None:
+        """ยิ้ม - หัวแกว่ง"""
+        try:
+            import numpy as np
+
+            intensity = motion_cmd.intensity.value
+            elapsed = 0.0
+
+            while elapsed < motion_cmd.duration:
+                angle_y = 10.0 * intensity * abs(float(np.sin(elapsed * 2 * np.pi / 1.0)))
+                self.smooth_values['FaceAngleY'].set_target(angle_y)
+                await asyncio.sleep(0.1)
+                elapsed += 0.1
+
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Happy motion error: {e}")
+
+async def _motion_sad(self, motion_cmd) -> None:
+        """เศร้า - หัวลง ตาลง"""
+        try:
+            intensity = motion_cmd.intensity.value
+
+            targets = {
+                'FaceAngleX': 10.0 * intensity,
+                'FaceAngleY': 0.0,
+                'FaceAngleZ': 0.0,
+                'EyeLeftY': -0.5 * intensity,
+                'EyeRightY': -0.5 * intensity,
+            }
+
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+
+            await asyncio.sleep(motion_cmd.duration)
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Sad motion error: {e}")
+
+async def _motion_angry(self, motion_cmd) -> None:
+        """โกรธ - หัวเงย บิด"""
+        try:
+            import random
+
+            intensity = motion_cmd.intensity.value
+
+            targets = {
+                'FaceAngleX': -10.0 * intensity,
+                'FaceAngleY': 0.0,
+                'FaceAngleZ': float(random.choice([-1, 1])) * 5.0 * intensity,
+            }
+
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+
+            await asyncio.sleep(motion_cmd.duration)
+            await self._motion_idle()
+        except Exception as e:
+            logger.debug(f"Angry motion error: {e}")
+
+async def _motion_idle(self) -> None:
+        """กลับเป็น idle"""
+        try:
+            import random
+
+            targets = self._generate_random_movement()
+            for param_name, target_value in targets.items():
+                if param_name in self.smooth_values:
+                    self.smooth_values[param_name].set_target(target_value)
+        except Exception as e:
+            logger.debug(f"Idle motion error: {e}")
+            # ยกเลิกงานเดิมถ้ามี แล้วสร้างใหม่
+            if self._lip_sync_task and not self._lip_sync_task.done():
+                self._lip_sync_running = False
+                try:
+                    self._lip_sync_task.cancel()
+                except Exception:
+                    pass
+    
 
     async def set_parameter_value(self, param_name: str, value: float, immediate: bool = True):
         """ตั้งค่าพารามิเตอร์เดี่ยว (เช่น MouthOpen) จากแหล่งภายนอก
@@ -509,6 +706,14 @@ class VTubeStudioController:
             self.movement_intensity = 0.4
         else:
             self.movement_intensity = 0.8
+        # เมื่อกลับสู่ idle ให้รีเฟรชตัวตั้งเวลาเพื่อให้เริ่มขยับทันที
+        if state == AnimationState.IDLE:
+            try:
+                self.last_movement_change = 0.0
+                self.movement_duration = random.uniform(1.0, 2.0) / self.movement_speed
+                self.last_eye_movement = 0.0
+            except Exception:
+                pass
     
     async def disconnect(self):
         """ตัดการเชื่อมต่อ"""

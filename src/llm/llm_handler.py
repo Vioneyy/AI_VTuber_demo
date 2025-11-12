@@ -66,7 +66,8 @@ class LLMHandler:
             base = 64  # เพิ่ม base เพื่อให้มีงบโทเค็นพอสำหรับ 2 ประโยคแม้ข้อความสั้น
             buffer = 24  # กันสำรองเพื่อปิดประโยค
             scale = approx_len // 2  # ภาษาไทยมี tokenization ถี่ จึงใช้สเกลสูงขึ้น
-            dynamic_max = max(64, min(config.llm.max_tokens, base + scale + buffer))
+            # ✅ ประหยัด token: กำหนด max เล็กลง (ตาม .env)
+            dynamic_max = int(config.llm.max_tokens)  # ใช้ค่าจาก .env โดยตรง (110)
             
             # เรียก API
             response = await asyncio.wait_for(
