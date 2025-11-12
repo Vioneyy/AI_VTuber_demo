@@ -90,7 +90,10 @@ class VTubeStudioConfig:
     model_name: str = "Hiyori_A"
     
     # Animation Settings
-    idle_update_rate: float = 0.05
+    # เพิ่มความถี่การอัปเดตเพื่อลดอาการดีเลย์ใน lip sync
+    idle_update_rate: float = 0.02
+    # เปิดการขยับสุ่มตอน idle (ปิดได้ผ่าน .env ถ้าต้องการ)
+    idle_motion_enabled: bool = True
     smooth_factor: float = 0.15
     movement_intensity: tuple = (0.3, 0.8)
     
@@ -131,7 +134,10 @@ class DiscordConfig:
 @dataclass
 class YouTubeConfig:
     """การตั้งค่า YouTube Live"""
-    enabled: bool = False
+    # อ่านค่าจาก .env ให้ถูกต้อง
+    enabled: bool = os.getenv("YOUTUBE_ENABLED", "false").lower() == "true"
+    # รองรับทั้ง VIDEO_ID และ STREAM_ID (เลือกใช้ตัวที่มีค่า)
+    video_id: str = os.getenv("YOUTUBE_VIDEO_ID", "")
     stream_id: str = os.getenv("YOUTUBE_STREAM_ID", "")
     check_interval: float = 5.0
     read_comment_once: bool = True

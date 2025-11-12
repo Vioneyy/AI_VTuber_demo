@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class DiscordBotAdapter:
     """Discord Bot with fixed voice reception"""
     
-    def __init__(self, token: str, admin_ids: set):
+    def __init__(self, token: str, admin_ids: set, motion_controller=None):
         """Initialize bot"""
         intents = discord.Intents.default()
         intents.message_content = True
@@ -39,6 +39,8 @@ class DiscordBotAdapter:
         
         self.token = token
         self.admin_ids = admin_ids
+        # ตัวควบคุม VTS สำหรับ lipsync ตรงกับเสียงที่เล่น
+        self.motion_controller = motion_controller
         
         # Callbacks
         self.on_voice_input: Optional[Callable] = None
@@ -479,6 +481,15 @@ class DiscordBotAdapter:
             self.voice_client.play(audio_source)
             logger.info("🔊 Playing audio...")
 
+            # เริ่มลิปซิงค์พร้อมกับการเล่นเสียง (ถ้ามี motion_controller)
+            lipsync_task = None
+            if self.motion_controller is not None:
+                try:
+                    await self.motion_controller.set_talking(True)
+                except Exception:
+                    pass
+                lipsync_task = asyncio.create_task(self._lipsync_for_playback(audio_source))
+
             try:
                 await asyncio.wait_for(playback_done.wait(), timeout=60.0)
                 logger.info("✅ Audio playback completed")
@@ -486,12 +497,135 @@ class DiscordBotAdapter:
                 logger.warning("⚠️ Audio playback timeout; stopping.")
             finally:
                 self._is_playing = False
+                # ปิดปากและกลับสู่ idle อย่างนุ่มนวล
+                if self.motion_controller is not None:
+                    try:
+                        await self.motion_controller.set_parameter_value("MouthOpen", 0.0)
+                        await self.motion_controller.stop_speaking()
+                        await self.motion_controller.update_idle_motion()
+                    except Exception:
+                        pass
             
         except Exception as e:
             logger.error(f"Error playing audio: {e}", exc_info=True)
         finally:
             # เปิดการฟังเสียงอีกครั้งหลังเล่นเสร็จ
             self.is_recording = prev_recording
+
+    async def _lipsync_for_playback(self, audio_source: 'NumpyAudioSource'):
+        """ขับเคลื่อนลิปซิงค์ตามเฟรม 20ms ที่ Discord เล่นจริง"""
+        try:
+            # รอจนเริ่มเล่นจริงเพื่อซิงค์เวลาให้ตรงที่สุด
+            for _ in range(50):
+                if self.voice_client and self.voice_client.is_playing():
+                    break
+                await asyncio.sleep(0.01)
+
+            samples = getattr(audio_source, 'mono_samples', None)
+            if samples is None or samples.size == 0:
+                return
+
+            sr = 48000
+            chunk = 960  # 20ms per frame
+            ema = 0.0
+            attack = 0.6
+            release = 0.12
+            scale = 1.4
+            silence_rms = 0.02  # เกณฑ์เสียงเงียบโดยประมาณสำหรับ float [-1,1]
+
+            # Smoothing สำหรับ MouthForm ให้รูปปากดูเป็นธรรมชาติ
+            form_ema = 0.5
+            form_attack = 0.5
+            form_release = 0.2
+
+            i = 0
+            mouth_open = 0.0
+            while self.voice_client and self.voice_client.is_playing() and i < samples.size:
+                seg = samples[i:i+chunk]
+                if seg.size == 0:
+                    break
+
+                seg_f = seg.astype(np.float32)
+                rms = float(np.sqrt(np.mean(seg_f ** 2)))
+                # ปรับ normalization สำหรับ float PCM [-1,1]
+                vol = min(max(rms / 0.2, 0.0), 1.0)
+
+                if vol > ema:
+                    ema = attack * vol + (1 - attack) * ema
+                else:
+                    ema = release * vol + (1 - release) * ema
+
+                mouth_open = max(0.0, min(1.0, ema * scale))
+                # ถ้าเฟรมเงียบมาก ให้ลดการอ้าปากลงเพื่อความเป็นธรรมชาติ
+                if rms < silence_rms:
+                    mouth_open = max(0.0, mouth_open * 0.4)
+                try:
+                    await self.motion_controller.set_parameter_value("MouthOpen", mouth_open, immediate=False)
+                except Exception:
+                    pass
+
+                # เพิ่ม MouthForm ตามลักษณะสเปกตรัมแบบง่าย ๆ
+                try:
+                    # คำนวณ spectral centroid
+                    nfft = 1024
+                    if seg_f.size < nfft:
+                        pad = np.zeros(nfft - seg_f.size, dtype=np.float32)
+                        x = np.concatenate([seg_f, pad])
+                    else:
+                        x = seg_f[:nfft]
+                    spec = np.abs(np.fft.rfft(x))
+                    freqs = np.fft.rfftfreq(x.size, d=1.0/sr)
+                    spec_sum = float(spec.sum())
+                    centroid = float((spec * freqs).sum() / spec_sum) if spec_sum > 1e-8 else 0.0
+
+                    # zero-crossing rate (ประมาณพยัญชนะฟู่/ลม)
+                    zc = np.mean(np.abs(np.diff(np.signbit(seg_f)))) if seg_f.size > 1 else 0.0
+
+                    # map เป็น MouthForm
+                    if rms < silence_rms:
+                        form_target = 0.05  # ปากเกือบปิด
+                    elif centroid < 2500.0 and rms >= silence_rms * 1.5:
+                        form_target = 0.75  # สระเปิด (อา)
+                    elif centroid < 4500.0:
+                        form_target = 0.55  # สระกลาง
+                    else:
+                        form_target = 0.25  # พยัญชนะเสียงฟู่/ลม -> ปากแคบ
+
+                    # ปรับด้วย zc เล็กน้อยให้พยัญชนะฝืดแคบลง
+                    form_target = max(0.1, min(0.9, form_target - 0.1 * float(zc)))
+
+                    # smoothing
+                    if form_target > form_ema:
+                        form_ema = form_attack * form_target + (1 - form_attack) * form_ema
+                    else:
+                        form_ema = form_release * form_target + (1 - form_release) * form_ema
+
+                    # variation เบา ๆ เพื่อหลีกเลี่ยงความเป็นหุ่นยนต์
+                    jitter = 0.02
+                    mouth_form = max(0.0, min(1.0, form_ema + np.random.uniform(-jitter, jitter)))
+                    await self.motion_controller.set_parameter_value("MouthForm", mouth_form, immediate=False)
+                except Exception:
+                    # ถ้าไม่มี MouthForm หรือเกิดข้อผิดพลาดด้าน FFT ให้ข้าม
+                    pass
+
+                i += chunk
+                await asyncio.sleep(chunk / sr)
+
+            # ปิดปากอย่างนิ่มนวลเมื่อจบ
+            try:
+                for t in np.linspace(mouth_open, 0.0, num=5):
+                    await self.motion_controller.set_parameter_value("MouthOpen", float(t), immediate=False)
+                    await asyncio.sleep(0.01)
+                await self.motion_controller.set_parameter_value("MouthOpen", 0.0)
+                # รีเซ็ตรูปปากกลับค่ากลาง ๆ
+                try:
+                    await self.motion_controller.set_parameter_value("MouthForm", 0.5, immediate=False)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Lipsync coroutine error: {e}")
     
     async def start(self):
         """Start bot"""
@@ -664,6 +798,12 @@ class NumpyAudioSource(discord.AudioSource):
         except Exception as e:
             logger.debug(f"Fade-in/out failed: {e}")
         
+        # เก็บสัญญาณโมโน 48k หลังประมวลผลไว้สำหรับลิปซิงค์แบบเฟรม
+        try:
+            self.mono_samples = audio_data.astype(np.float32).copy()
+        except Exception:
+            self.mono_samples = audio_data
+        
         # Convert to int16 (mono)
         audio_data = np.clip(audio_data, -1.0, 1.0)
         mono_int16 = (audio_data * 32767).astype(np.int16)
@@ -704,6 +844,13 @@ class NumpyAudioSource(discord.AudioSource):
             pad_bytes = pad_samples * 4  # int16 stereo (2 channels)
             if pad_bytes > 0:
                 self.audio_bytes += b"\x00" * pad_bytes
+                try:
+                    # เพิ่ม pad ในสัญญาณโมโนสำหรับลิปซิงค์ให้ความยาวตรงกัน
+                    self.mono_samples = np.concatenate(
+                        [self.mono_samples, np.zeros(pad_samples, dtype=np.float32)]
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Tail pad failed: {e}")
         self.position = 0
