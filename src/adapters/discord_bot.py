@@ -433,7 +433,7 @@ class DiscordBotAdapter:
 
     
     async def play_audio(self, audio_data: np.ndarray, sample_rate: int):
-        """เล่นเสียง"""
+        """เล่นเสียง (ไม่บล็อก event loop)"""
         if not self.voice_client or not self.voice_client.is_connected():
             logger.warning("⚠️  ไม่ได้เชื่อมต่อ voice channel")
             return
@@ -471,16 +471,21 @@ class DiscordBotAdapter:
             except Exception as rec_e:
                 logger.warning(f"⚠️ Failed to save bot playback: {rec_e}")
             
+            # ใช้ Event เพื่อรอจบการเล่นแบบ non-blocking
+            playback_done = asyncio.Event()
+            audio_source.finished_callback = lambda: playback_done.set()
+
             # เล่นเสียง
             self.voice_client.play(audio_source)
-            
             logger.info("🔊 Playing audio...")
-            
-            # รอจนเล่นเสร็จ
-            while self.voice_client.is_playing():
-                await asyncio.sleep(0.1)
-            
-            logger.info("✅ Audio playback completed")
+
+            try:
+                await asyncio.wait_for(playback_done.wait(), timeout=60.0)
+                logger.info("✅ Audio playback completed")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Audio playback timeout; stopping.")
+            finally:
+                self._is_playing = False
             
         except Exception as e:
             logger.error(f"Error playing audio: {e}", exc_info=True)
@@ -541,6 +546,8 @@ class NumpyAudioSource(discord.AudioSource):
             audio_data: Audio data (numpy array, float32)
             sample_rate: Sample rate
         """
+        # ✅ callback เมื่อจบการเล่น
+        self.finished_callback = None
         # Debug stats (before any processing)
         try:
             pre_mean = float(np.mean(audio_data))
@@ -713,6 +720,14 @@ class NumpyAudioSource(discord.AudioSource):
         
         frame = self.audio_bytes[self.position:self.position + self.frame_size]
         self.position += self.frame_size
+        
+        # ✅ เมื่อจบ ให้เรียก callback
+        if self.position >= len(self.audio_bytes):
+            if self.finished_callback:
+                try:
+                    self.finished_callback()
+                except Exception:
+                    pass
         
         # Pad if needed
         if len(frame) < self.frame_size:

@@ -314,11 +314,7 @@ class VTubeStudioController:
         print("🛑 Animation Loop หยุดทำงาน")
 
     async def start_lip_sync_from_file(self, audio_file_path: str):
-        """Lip sync โดยอ้างอิงจากไฟล์เสียงจริง (WAV PCM16)
-        - อ่านบัฟเฟอร์ทีละ 20ms
-        - คำนวณ RMS พร้อม envelope follower (attack/release)
-        - ส่งค่า MouthOpen แบบ smooth ไปยัง VTS
-        """
+        """Lip sync โดยไม่ block (ปรับ: ใช้ wait_for + timeout)"""
         if not self.authenticated or not self.model_loaded:
             return
         if 'MouthOpen' not in self.available_parameters:
@@ -332,10 +328,8 @@ class VTubeStudioController:
                 with wave.open(audio_file_path, 'rb') as wav:
                     sample_rate = wav.getframerate()
                     n_frames = wav.getnframes()
-                    # อ่านทั้งหมดครั้งเดียว (ไฟล์สั้นจาก TTS)
                     audio_bytes = wav.readframes(n_frames)
                 audio = np.frombuffer(audio_bytes, dtype=np.int16)
-                # 20ms chunk
                 chunk_size = max(1, int(sample_rate * 0.02))
                 ema = 0.0
                 attack = 0.5
@@ -348,21 +342,27 @@ class VTubeStudioController:
                     if chunk.size == 0:
                         continue
                     rms = float(np.sqrt(np.mean(chunk ** 2)))
-                    # normalize สำหรับ 16-bit PCM
                     volume = min(rms / 2500.0, 1.0)
-                    # envelope follower
                     if volume > ema:
                         ema = attack * volume + (1 - attack) * ema
                     else:
                         ema = release * volume + (1 - release) * ema
 
                     mouth_open = max(0.0, min(1.0, ema * 1.4))
+                    # ✅ ใช้ wait_for + timeout เพื่อไม่ block
                     try:
-                        await self.set_parameter_value('MouthOpen', mouth_open, immediate=True)
-                        # Optional: mouth form parameter if present
+                        await asyncio.wait_for(
+                            self.set_parameter_value('MouthOpen', mouth_open, immediate=True),
+                            timeout=0.1
+                        )
                         if 'MouthForm' in self.available_parameters:
                             mouth_form = 0.5 if mouth_open > 0.3 else 0.0
-                            await self.set_parameter_value('MouthForm', mouth_form, immediate=False)
+                            await asyncio.wait_for(
+                                self.set_parameter_value('MouthForm', mouth_form, immediate=False),
+                                timeout=0.1
+                            )
+                    except asyncio.TimeoutError:
+                        pass
                     except Exception:
                         pass
                     await asyncio.sleep(chunk_size / sample_rate)
@@ -386,19 +386,16 @@ class VTubeStudioController:
         self._lip_sync_task = asyncio.create_task(_run())
     
     async def _send_parameters(self, parameters: Dict[str, float]):
-        """ส่งค่าพารามิเตอร์ไปยัง VTS"""
+        """ส่งค่าพารามิเตอร์ไปยัง VTS (ปรับ: ไม่ block)"""
         if not self.authenticated or not self.model_loaded or not self.ws:
             return
         
         try:
-            # กรองเฉพาะ parameters ที่โมเดลมี
             valid_params = []
             for param_name, value in parameters.items():
                 if param_name in self.available_parameters:
-                    # จำกัดค่าตาม min/max
                     param_info = self.available_parameters[param_name]
                     clamped_value = max(param_info['min'], min(param_info['max'], value))
-                    
                     valid_params.append({
                         "id": param_name,
                         "value": clamped_value
@@ -417,10 +414,16 @@ class VTubeStudioController:
                 }
             }
             
-            await self.ws.send(json.dumps(request))
-            
-        except Exception as e:
-            # ไม่ต้อง print error ทุกครั้ง (จะ spam มาก)
+            # ✅ ส่งด้วย timeout สั้นเพื่อไม่ block
+            try:
+                await asyncio.wait_for(self.ws.send(json.dumps(request)), timeout=0.5)
+            except asyncio.TimeoutError:
+                # non-critical: ข้ามเพื่อไม่บล็อก loop
+                pass
+            except Exception:
+                pass
+        except Exception:
+            # เงียบไว้เพื่อหลีกเลี่ยง spam
             pass
 
     async def set_parameter_value(self, param_name: str, value: float, immediate: bool = True):
