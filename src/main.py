@@ -386,6 +386,15 @@ class JeedAIVTuber:
             user_name="User",
             priority=Priority.VOICE
         )
+
+    async def _run_lip_sync_concurrent(self, audio_file: str):
+        """รัน lip sync เป็น concurrent task (ไม่รอ)"""
+        try:
+            if self.vts_client:
+                await self.vts_client.set_talking(True)
+                await self.vts_client.start_lip_sync_from_file(audio_file)
+        except Exception as e:
+            logger.debug(f"Concurrent lip sync error: {e}")
     
     async def _process_queue_item(self, item: QueueItem):
         """Process queue item: LLM -> TTS -> Discord playback + VTS talking"""
@@ -460,30 +469,22 @@ class JeedAIVTuber:
                         wf.setsampwidth(2)
                         wf.setframerate(int(sample_rate))
                         wf.writeframes(_pcm16.tobytes())
-                    # เริ่ม lip sync จากไฟล์เสียงจริงแบบ async
+                    # ✅ ปรับ: สร้าง lip sync task แยกแต่ไม่รอ
                     if self.vts_client:
-                        try:
-                            await self.vts_client.start_lip_sync_from_file(str(temp_wav))
-                        except Exception:
-                            # fallback: ตั้งสถานะกำลังพูด
-                            try:
-                                await self.vts_client.set_talking(True)
-                            except Exception:
-                                pass
+                        asyncio.create_task(
+                            self._run_lip_sync_concurrent(str(temp_wav))
+                        )
                 except Exception as e:
                     logger.debug(f"Lip sync WAV prepare failed: {e}")
 
+                # ✅ เล่นเสียง (non-blocking แล้ว)
                 await self.discord_bot.play_audio(audio_data, sample_rate)
 
                 if self.vts_client:
                     try:
                         await self.vts_client.stop_speaking()
                     except Exception:
-                        # fallback
-                        try:
-                            await self.vts_client.set_talking(False)
-                        except Exception:
-                            pass
+                        pass
                 logger.info("✅ Audio played successfully")
             else:
                 logger.warning("⚠️ Not connected to a Discord voice channel; cannot play audio")
