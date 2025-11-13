@@ -36,6 +36,7 @@ class YouTubeLiveAdapter:
     async def start(self):
         """เริ่มอ่าน YouTube Live Chat"""
         try:
+            # สร้าง client ใน main thread เพื่อหลีกเลี่ยง signal error บน Windows
             self.chat = pytchat.create(video_id=self.video_id)
             self.running = True
             logger.info(f"✅ เชื่อมต่อ YouTube Live: {self.video_id}")

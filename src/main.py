@@ -131,6 +131,8 @@ class JeedAIVTuber:
         # YouTube Live
         self.youtube_task = None
         self.youtube_chat = None
+        # stop event for youtube loop (async cancellation)
+        self._youtube_stop_event: asyncio.Event | None = None
         # แจ้ง YouTube connect ครั้งแรกที่ระดับ INFO ครั้งถัดไปเป็น DEBUG
         self._yt_connected_once = False
         # เก็บ comment IDs ที่อ่านไปแล้ว เพื่อกันการอ่านซ้ำข้ามรอบ
@@ -281,6 +283,12 @@ class JeedAIVTuber:
             # Set callbacks
             self.discord_bot.on_voice_input = self._handle_voice_input
             self.discord_bot.on_text_command = self._handle_text_command
+            # Wire YouTube controls to main controller
+            try:
+                self.discord_bot.on_youtube_start = self.start_youtube
+                self.discord_bot.on_youtube_stop = self.stop_youtube
+            except Exception:
+                pass
             # ส่งสถานะระบบภายนอกให้ Discord Bot สำหรับรายงานในห้อง
             try:
                 self.discord_bot.update_external_status(
@@ -342,12 +350,7 @@ class JeedAIVTuber:
                     self._yt_read_once = bool(getattr(yt_cfg, 'read_comment_once', True))
                     raw_id = getattr(yt_cfg, 'stream_id', '') or getattr(yt_cfg, 'video_id', '')
                     if raw_id:
-                        self.youtube_task = asyncio.create_task(
-                            self._youtube_live_loop(),
-                            name="youtube_live"
-                        )
-                        self.tasks.append(self.youtube_task)
-                        logger.info(f"📺 เริ่มอ่านคอมเมนต์ YouTube Live (raw): {raw_id}")
+                        await self.start_youtube(video_id=raw_id)
                     else:
                         logger.info("ℹ️ YouTube Live เปิดใช้งาน แต่ไม่มีค่า stream/video ID — จะไม่เริ่มลูป YouTube")
                 else:
@@ -395,9 +398,7 @@ class JeedAIVTuber:
 
         # Stop YouTube Live
         try:
-            if self.youtube_chat:
-                logger.info("🛑 ปิดการเชื่อมต่อ YouTube Live")
-                self.youtube_chat.terminate()
+            await self.stop_youtube()
         except Exception:
             pass
 
@@ -605,7 +606,7 @@ class JeedAIVTuber:
                 logger.info("ℹ️ YouTube Live ถูกปิดใช้งาน — ข้ามลูป YouTube", extra={'console': True})
                 return
 
-            raw_id = getattr(yt_cfg, 'stream_id', '') or getattr(yt_cfg, 'video_id', '')
+            raw_id = getattr(self, '_temp_video_id', None) or getattr(yt_cfg, 'stream_id', '') or getattr(yt_cfg, 'video_id', '')
             if not raw_id:
                 logger.info("ℹ️ YouTube Live ไม่มีค่า stream/video ID — ข้ามลูป YouTube", extra={'console': True})
                 return
@@ -614,8 +615,9 @@ class JeedAIVTuber:
             logger.info(f"📺 เริ่มอ่าน YouTube Live: raw='{raw_id}' → id='{video_id}'", extra={'console': True})
 
             backoff = 5.0
-            while self.running:
+            while self.running and not (self._youtube_stop_event and self._youtube_stop_event.is_set()):
                 try:
+                    # สร้าง pytchat client ใน main thread เพื่อหลีกเลี่ยง signal error
                     self.youtube_chat = pytchat.create(video_id=video_id)
                     if not self._yt_connected_once:
                         logger.info(f"✅ เชื่อมต่อ YouTube Live: {video_id}", extra={'console': True})
@@ -625,7 +627,8 @@ class JeedAIVTuber:
 
                     interval = float(getattr(yt_cfg, 'check_interval', 5.0))
                     max_batch = int(getattr(yt_cfg, 'max_comments_per_batch', 5))
-                    while self.running and self.youtube_chat.is_alive():
+                    guard_pct = float(getattr(yt_cfg, 'queue_guard_pct', 0.7))
+                    while self.running and self.youtube_chat.is_alive() and not (self._youtube_stop_event and self._youtube_stop_event.is_set()):
                         try:
                             # Backpressure guard: หากคิวแน่น ให้พักก่อนเพื่อไม่ให้ภาระไปกวน animation
                             try:
@@ -633,7 +636,7 @@ class JeedAIVTuber:
                                 qmax = getattr(self.queue_manager, 'max_size', 50)
                             except Exception:
                                 qsize, qmax = 0, 50
-                            if qsize >= max(1, int(qmax * 0.7)):
+                            if qsize >= max(1, int(qmax * guard_pct)):
                                 logger.info(f"⏸️  YouTube พักอ่านชั่วคราว (queue {qsize}/{qmax})", extra={'console': True})
                                 await asyncio.sleep(interval)
                                 continue
@@ -683,6 +686,68 @@ class JeedAIVTuber:
                     backoff = min(backoff * 2, 60.0)
         except Exception as e:
             logger.error(f"❌ YouTube Live loop error: {e}", exc_info=True)
+
+    async def start_youtube(self, video_id: str | None = None):
+        """
+        Start the youtube polling loop in a cancellable task.
+        If video_id provided, override config value for this run.
+        """
+        if self.youtube_task and not self.youtube_task.done():
+            logger.info("ℹ️ YouTube reader already running")
+            return
+
+        # create stop event
+        self._youtube_stop_event = asyncio.Event()
+
+        # if caller passes explicit video id, temporarily override config for this run
+        if video_id:
+            try:
+                yt_cfg = getattr(self.config, 'youtube', None)
+                if yt_cfg:
+                    # keep original if needed
+                    self._temp_video_id = video_id
+            except Exception:
+                pass
+
+        logger.info("📺 Starting YouTube reader task...")
+        self.youtube_task = asyncio.create_task(self._youtube_live_loop(), name="youtube_live")
+        self.tasks.append(self.youtube_task)
+
+    async def stop_youtube(self):
+        """
+        Signal the youtube loop to stop and wait for it to finish.
+        This will also terminate the pytchat connection if present.
+        """
+        logger.info("🛑 Stopping YouTube reader...")
+        try:
+            if self._youtube_stop_event and not self._youtube_stop_event.is_set():
+                self._youtube_stop_event.set()
+            # cancel task if still running
+            if self.youtube_task:
+                try:
+                    self.youtube_task.cancel()
+                    await asyncio.wait_for(self.youtube_task, timeout=5.0)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    # task may have ended already
+                    pass
+                self.youtube_task = None
+            # If underlying pytchat object exists, terminate it cleanly
+            try:
+                if getattr(self, 'youtube_chat', None) is not None:
+                    # pytchat has terminate method
+                    try:
+                        self.youtube_chat.terminate()
+                    except Exception:
+                        # ignore terminate errors
+                        pass
+                    self.youtube_chat = None
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Ignoring youtube stop error: {e}")
+        logger.info("✅ YouTube reader stopped")
 
     def _normalize_youtube_id(self, raw: str) -> str:
         """รับทั้ง URL และตัว ID แล้วคืน video_id ที่ pytchat รองรับ"""

@@ -2,6 +2,7 @@
 TTS Engine Factory - บังคับใช้ F5-TTS-Thai เท่านั้น (ไม่มี fallback)
 """
 import os
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
@@ -38,7 +39,8 @@ class F5TTSThai:
                 pass
 
     async def generate(self, text: str) -> bytes:
-        return self.engine.synthesize(text)
+        # Offload synchronous TTS synth to a thread to avoid blocking the event loop
+        return await asyncio.to_thread(self.engine.synthesize, text)
 
     def _fallback_engine(self):
         class _SilentEngine:
@@ -66,13 +68,18 @@ class F5ThaiAdapter:
         self.engine = engine
 
     async def generate(self, text: str) -> str:
-        wav_bytes = self.engine.synthesize(text)
-        # เขียนเป็นไฟล์ชั่วคราว
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp.write(wav_bytes)
-        tmp.flush()
-        tmp.close()
-        return str(Path(tmp.name))
+        # ห่อทั้ง synth และเขียนไฟล์ชั่วคราวใน background thread
+        def _synth_to_tmp() -> str:
+            wav_bytes = self.engine.synthesize(text)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            try:
+                tmp.write(wav_bytes)
+                tmp.flush()
+                return str(Path(tmp.name))
+            finally:
+                tmp.close()
+
+        return await asyncio.to_thread(_synth_to_tmp)
 
 
 def create_tts_engine(engine_type: str | None = None):

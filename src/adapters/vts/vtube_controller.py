@@ -563,10 +563,15 @@ class VTubeStudioController:
             try:
                 self._lip_sync_running = True
                 
-                with wave.open(audio_file_path, 'rb') as wav:
-                    sample_rate = wav.getframerate()
-                    n_frames = wav.getnframes()
-                    audio_bytes = wav.readframes(n_frames)
+                # อ่านไฟล์ WAV แบบ non-blocking เพื่อไม่บล็อก event loop
+                def _read_wav(path: str):
+                    import wave as _w
+                    with _w.open(path, 'rb') as wav:
+                        sr = wav.getframerate()
+                        n_frames = wav.getnframes()
+                        data = wav.readframes(n_frames)
+                        return sr, data
+                sample_rate, audio_bytes = await asyncio.to_thread(_read_wav, audio_file_path)
                     
                 audio = np.frombuffer(audio_bytes, dtype=np.int16)
                 

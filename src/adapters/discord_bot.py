@@ -41,6 +41,10 @@ class DiscordBotAdapter:
         self.admin_ids = admin_ids
         # ตัวควบคุม VTS สำหรับ lipsync ตรงกับเสียงที่เล่น
         self.motion_controller = motion_controller
+
+        # Callbacks for system-level controls
+        self.on_youtube_start: Optional[Callable] = None
+        self.on_youtube_stop: Optional[Callable] = None
         
         # Callbacks
         self.on_voice_input: Optional[Callable] = None
@@ -76,6 +80,35 @@ class DiscordBotAdapter:
             f"Discord voice settings: silence_threshold={self.silence_threshold}, min_audio_duration={self.min_audio_duration}"
         )
     
+    def _build_help_text(self) -> str:
+        """สร้างข้อความคู่มือคำสั่งจากรายการคำสั่งที่ลงทะเบียน"""
+        try:
+            lines = ["📝 **คำสั่ง Jeed Bot**"]
+            # เรียงชื่อคำสั่งเพื่อให้อ่านง่าย
+            for cmd in sorted(self.bot.commands, key=lambda c: c.name):
+                if getattr(cmd, 'hidden', False):
+                    continue
+                desc = getattr(cmd, 'short_doc', None) or getattr(cmd, 'help', None) or ''
+                # รูปแบบ: !name — description
+                if desc:
+                    lines.append(f"!{cmd.name} — {desc}")
+                else:
+                    lines.append(f"!{cmd.name}")
+            return "\n".join(lines)
+        except Exception:
+            # fallback แบบคงที่ หากเกิดข้อผิดพลาด
+            return (
+                "📝 **คำสั่ง Jeed Bot**\n"
+                "!join — ให้บอทเข้าห้องเสียง\n"
+                "!leave — ให้บอทออกจากห้องเสียง\n"
+                "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้\n"
+                "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ\n"
+                "!status — ดูสถานะระบบโดยย่อ\n"
+                "!yt_start — เริ่มอ่านแชท YouTube\n"
+                "!yt_stop — หยุดอ่านแชท YouTube\n"
+                "!help — แสดงคู่มือคำสั่ง"
+            )
+
     def _register_events(self):
         """Register bot events"""
         
@@ -88,7 +121,7 @@ class DiscordBotAdapter:
                 await self.bot.change_presence(
                     activity=discord.Activity(
                         type=discord.ActivityType.listening,
-                        name="ใช้ !help | !join | !voice | !ask"
+                        name="ใช้ !help | !join | !voice | !ask | !yt_start"
                     )
                 )
             except Exception:
@@ -97,15 +130,7 @@ class DiscordBotAdapter:
             # ส่งข้อความช่วยเหลือไปยัง system channel (ถ้ามีสิทธิ์และยังไม่ส่ง)
             try:
                 if not hasattr(self, "_help_broadcasted") or not self._help_broadcasted:
-                    help_text = (
-                        "📝 **คำสั่ง Jeed Bot**\n"
-                        "!join — ให้บอทเข้าห้องเสียง\n"
-                        "!leave — ให้บอทออกจากห้องเสียง\n"
-                        "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้\n"
-                        "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ\n"
-                        "!status — ดูสถานะระบบโดยย่อ\n"
-                        "!help — แสดงคู่มือคำสั่งนี้อีกครั้ง"
-                    )
+                    help_text = self._build_help_text()
                     for guild in self.bot.guilds:
                         channel = getattr(guild, 'system_channel', None)
                         if channel:
@@ -263,18 +288,55 @@ class DiscordBotAdapter:
         async def help_cmd(ctx):
             """แสดงคู่มือคำสั่งสั้น ๆ"""
             try:
-                cmds = [
-                    "📝 **คำสั่ง Jeed Bot**",
-                    "!join — ให้บอทเข้าห้องเสียง",
-                    "!leave — ให้บอทออกจากห้องเสียง",
-                    "!voice on/off — เปิด/ปิดการรับเสียงจากผู้ใช้",
-                    "!ask <ข้อความ> — ส่งคำถามเพื่อให้บอทคิด-พูดตอบ",
-                    "!status — ดูสถานะระบบโดยย่อ",
-                ]
-                await ctx.send("\n".join(cmds))
+                await ctx.send(self._build_help_text())
             except Exception as e:
                 logger.error(f"help command error: {e}")
                 await ctx.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+        @self.bot.command(name='yt_start')
+        async def yt_start(ctx, video_id: Optional[str] = None):
+            """เริ่มอ่านแชท YouTube (เชื่อมต่อ polling loop)"""
+            try:
+                # ใช้ callback จากระบบหลักถ้ามี (แนะนำ)
+                if self.on_youtube_start:
+                    # ถ้าไม่ส่ง video_id ใช้จาก config ถ้ามี
+                    if not video_id:
+                        try:
+                            video_id = getattr(getattr(config, 'youtube', None), 'video_id', None) or getattr(config, 'YOUTUBE_VIDEO_ID', None)
+                        except Exception:
+                            video_id = None
+                    await self.on_youtube_start(video_id)
+                elif self.motion_controller and hasattr(self.motion_controller, 'start_youtube'):
+                    # fallback: หาก motion_controller รองรับ YouTube
+                    if not video_id:
+                        try:
+                            video_id = getattr(getattr(config, 'youtube', None), 'video_id', None) or getattr(config, 'YOUTUBE_VIDEO_ID', None)
+                        except Exception:
+                            video_id = None
+                    await self.motion_controller.start_youtube(video_id)
+                else:
+                    await ctx.send("⚠️ ระบบหลักยังไม่พร้อมควบคุม YouTube")
+                    return
+                await ctx.send(f"▶️ เริ่มอ่านแชท YouTube {'(video_id: ' + video_id + ')' if video_id else ''} สำเร็จ")
+            except Exception as e:
+                logger.error(f"yt_start command error: {e}")
+                await ctx.send(f"❌ เริ่มอ่านแชท YouTube ไม่สำเร็จ: {e}")
+
+        @self.bot.command(name='yt_stop')
+        async def yt_stop(ctx):
+            """หยุดอ่านแชท YouTube (ยกเลิก polling loop)"""
+            try:
+                if self.on_youtube_stop:
+                    await self.on_youtube_stop()
+                elif self.motion_controller and hasattr(self.motion_controller, 'stop_youtube'):
+                    await self.motion_controller.stop_youtube()
+                else:
+                    await ctx.send("⚠️ ระบบหลักยังไม่พร้อมควบคุม YouTube")
+                    return
+                await ctx.send("⛔ หยุดอ่านแชท YouTube แล้ว")
+            except Exception as e:
+                logger.error(f"yt_stop command error: {e}")
+                await ctx.send(f"❌ หยุดอ่านแชท YouTube ไม่สำเร็จ: {e}")
     
     async def _start_listening(self):
         """เริ่มฟังเสียง"""
@@ -388,11 +450,15 @@ class DiscordBotAdapter:
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                     out_path = record_dir / f"{safe_name}_{ts}.wav"
 
-                    with wave.open(str(out_path), 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)  # int16
-                        wf.setframerate(48000)
-                        wf.writeframes(audio_bytes)
+                    # เขียนไฟล์ WAV แบบ non-blocking เพื่อไม่บล็อก event loop
+                    def _write_wav(path: str, data: bytes):
+                        import wave as _w
+                        with _w.open(path, 'wb') as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)  # int16
+                            wf.setframerate(48000)
+                            wf.writeframes(data)
+                    await asyncio.to_thread(_write_wav, str(out_path), audio_bytes)
 
                     logger.info(f"💾 Saved voice recording: {out_path} ({duration:.2f}s)")
             except Exception as rec_err:
@@ -464,11 +530,15 @@ class DiscordBotAdapter:
                     out_path = record_dir / f"bot_{ts}.wav"
                     # เขียนเป็น WAV 16-bit @48kHz จาก audio_source.audio_bytes
                     import wave
-                    with wave.open(str(out_path), 'wb') as wf:
-                        wf.setnchannels(2)
-                        wf.setsampwidth(2)  # 16-bit
-                        wf.setframerate(48000)
-                        wf.writeframes(audio_source.audio_bytes)
+                    # เขียนไฟล์ WAV แบบ non-blocking เพื่อไม่บล็อก event loop
+                    def _write_wav_out(path: str, data: bytes):
+                        import wave as _w
+                        with _w.open(path, 'wb') as wf:
+                            wf.setnchannels(2)
+                            wf.setsampwidth(2)  # 16-bit
+                            wf.setframerate(48000)
+                            wf.writeframes(data)
+                    await asyncio.to_thread(_write_wav_out, str(out_path), audio_source.audio_bytes)
                     logger.info(f"💾 Saved bot playback: {out_path}")
             except Exception as rec_e:
                 logger.warning(f"⚠️ Failed to save bot playback: {rec_e}")

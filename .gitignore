@@ -20,6 +20,7 @@ temp/
 models/*.bin
 tools/ffmpeg/ffmpeg-8.0-essentials_build/
 tools/ffmpeg/ffmpeg-release-essentials.zip
+*.zip
 
 # OS files
 .DS_Store

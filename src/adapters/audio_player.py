@@ -97,11 +97,15 @@ class DiscordAudioPlayer:
     async def _lipsync_from_audio(self, audio_file: str, text: str):
         """Lip sync จากไฟล์เสียง"""
         try:
-            # อ่านไฟล์ WAV
-            with wave.open(audio_file, 'rb') as wav:
-                sample_rate = wav.getframerate()
-                n_frames = wav.getnframes()
-                audio_data = wav.readframes(n_frames)
+            # อ่านไฟล์ WAV แบบ non-blocking เพื่อไม่บล็อก event loop
+            def _read_wav(path: str):
+                import wave as _w
+                with _w.open(path, 'rb') as wav:
+                    sr = wav.getframerate()
+                    n_frames = wav.getnframes()
+                    data = wav.readframes(n_frames)
+                    return sr, data
+            sample_rate, audio_data = await asyncio.to_thread(_read_wav, audio_file)
                 
                 # แปลงเป็น numpy array
                 audio_array = np.frombuffer(audio_data, dtype=np.int16)

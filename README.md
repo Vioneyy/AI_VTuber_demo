@@ -1,7 +1,7 @@
 # AI VTuber Demo
 
 โปรเจกต์ตัวอย่างเพื่อสาธิตการเชื่อมต่อ LLM, TTS, และ VTube Studio พร้อมอะแดปเตอร์สำหรับ Discord และ YouTube Live (ปรับใหม่ให้ใช้ F5-TTS-Thai + Faster-Whisper)
-โหมดปัจจุบัน: TTS-only (ลบ RVC ออกทั้งหมด)
+สถานะปัจจุบัน: เน้น TTS (ลบ RVC ภายในออก), ปรับงานหนักให้ไม่บล็อก event loop ด้วย `asyncio.to_thread` (เช่น TTS inference/เขียนไฟล์, อ่านแชท YouTube)
 
 ## โครงสร้าง
 ```
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 ตัวอย่างตัวแปรสำคัญที่ต้องตั้งค่า:
 - `DISCORD_BOT_TOKEN` โทเคนบอท Discord
 - `OPENAI_API_KEY` คีย์สำหรับสมองหลัก
-- `YOUTUBE_STREAM_ID` ไอดีสตรีม YouTube Live
+- `YOUTUBE_STREAM_ID` ไอดีสตรีม YouTube Live (ถ้าไม่ตั้งจะปิด YouTube)
 - `VTS_PLUGIN_NAME` ชื่อปลั๊กอิน VTS
 - `VTS_PLUGIN_TOKEN` โทเคนสำหรับ VTS
 - `LLM_MODEL` ชื่อโมเดลที่ใช้
@@ -74,6 +74,10 @@ pip install -r requirements.txt
 - ใช้ F5-TTS-Thai สำหรับสังเคราะห์เสียงภาษาไทยจากข้อความ
 - ติดตั้ง `pip install f5-tts-th`
 - แนะนำให้ตั้งค่าไฟล์อ้างอิงเสียงและข้อความอ้างอิงเพื่อให้เสียงคงเส้นคงวา
+
+ปรับให้ไม่บล็อก event loop:
+- เรียก `engine.synthesize(text)` ผ่าน `asyncio.to_thread(...)` เพื่อให้ inference ไปรันใน background thread
+- การเขียนไฟล์ WAV/ชั่วคราวก็ห่อไปรันใน background thread เช่นกัน
 
 โหมดบังคับใช้เฉพาะ F5-TTS-Thai (ไม่ fallback):
 - ตั้งค่าใน `.env`: `TTS_STRICT_ONLY=true`
@@ -97,10 +101,16 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
+หมายเหตุ Windows (สำคัญ): สร้าง `pytchat` client บน main thread เท่านั้น (หลีกเลี่ยง `signal only works in main thread`) ส่วนลูปอ่านแชทใช้ `asyncio.to_thread(...)` เพื่อไม่บล็อก event loop
+
 ## ใช้บอทใน Discord
 - คำสั่ง `!join` ให้บอทเข้าห้องเสียง
 - พูดในห้องเสียง บอทจะถอดความด้วย Faster-Whisper และตอบเสียงด้วย F5-TTS-Thai
 - คำสั่ง `!leave` ออกจากห้องเสียง
+
+คำสั่ง YouTube (ผ่าน Discord):
+- `!yt_start <stream_id>` เริ่มอ่านแชทจาก YouTube Live (ถ้าไม่มีอาร์กิวเมนต์ จะใช้ `YOUTUBE_STREAM_ID` จาก `.env`)
+- `!yt_stop` หยุดอ่านแชท YouTube
 
 หมายเหตุ:
 - บอทจะถอดความและพูดตอบโดยอัตโนมัติโดยใช้ F5-TTS-Thai เป็นฐานเสียง
@@ -131,6 +141,19 @@ python src/main.py
 - ค่ามาตรฐานใน `.env` ใช้งานได้ดี ไม่จำเป็นต้องแก้ หากต้องการเคลื่อนไหวเนียนขึ้น ให้ลองปรับ `VTS_MOVEMENT_SMOOTHING` ไปช่วง 0.88–0.92
 - หากยังเอียงมากไป สามารถลดสเกล `FaceAngleZ` เพิ่มเติม หรือปรับช่วง clamp ใน `src/adapters/vts/motion_controller.py`
 - ไม่มีหน้า Web UI สำหรับดูพฤติกรรม motion ในโปรเจกต์นี้ ขณะทดสอบให้สังเกตผลผ่านหน้าจอ VTube Studio โดยตรง
+
+## สถานะระบบปัจจุบัน
+- Discord: เข้าห้องเสียง, รับเสียงผู้ใช้, STT ด้วย Faster-Whisper (เลือกได้), ตอบกลับด้วย F5-TTS-Thai
+- YouTube Live: อ่านแชทผ่าน `pytchat` (สร้าง client บน main thread, ลูปอ่านเป็น background thread)
+- LLM: ใช้ OpenAI ผ่าน `LLM_MODEL` ที่กำหนด, จำกัดความยาวและอุณหภูมิสำหรับความเร็ว/เสถียร
+- VTS: ส่งพารามิเตอร์ด้วยอัตราที่ควบคุม ลด jitter ด้วย smoothing และ guard
+- Performance: ย้ายงาน I/O/inference ไป background thread เพื่อลดการค้างเฟรม
+- Safety: มีตัวกรองข้อความหยาบและฟิลเตอร์ความปลอดภัยเปิดได้ใน `.env`
+
+## Known Issues / Tips
+- ถ้าพบข้อความ `signal only works in main thread` ให้ตรวจสอบว่าสร้าง `pytchat.create(...)` บน main thread แล้ว และอย่าใช้ `to_thread` ตอนสร้าง client
+- ถ้ารู้สึกเฟรมตกระหว่างพูด: ลด `LLM_MAX_TOKENS`, เพิ่ม `VTS_SEND_MIN_INTERVAL_MS`, และคงค่า `TTS_SPEED` ใกล้ 1.0
+- ถ้าเสียง TTS เริ่มต้นช้ารอบแรก (warm-up): เป็นปกติของโมเดล F5-TTS; รอบถัดไปจะเร็วขึ้น
 
 ## หมายเหตุการล้างไฟล์เก่า
 - โค้ด/สคริปต์ที่เกี่ยวกับ RVC ถูกลบออกจากโปรเจกต์เพื่อความเรียบง่าย
