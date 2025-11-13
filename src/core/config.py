@@ -88,6 +88,15 @@ class VTubeStudioConfig:
     plugin_name: str = os.getenv("VTS_PLUGIN_NAME", "Jeed_AI_VTuber")
     plugin_token: str = os.getenv("VTS_PLUGIN_TOKEN", "")
     model_name: str = "Hiyori_A"
+    # ลดอัตราการส่งพารามิเตอร์ (มิลลิวินาทีต่อครั้ง)
+    send_min_interval_ms: int = int(os.getenv("VTS_SEND_MIN_INTERVAL_MS", "32"))
+
+    # Smoothness Guard (จำกัดความเปลี่ยนแปลงต่อเฟรมเพื่อให้เคลื่อนไหวนุ่มนวล)
+    smoothness_guard: bool = os.getenv("VTS_SMOOTHNESS_GUARD", "true").lower() == "true"
+    smooth_max_delta_angle: float = float(os.getenv("VTS_SMOOTH_MAX_DELTA_ANGLE", "0.08"))
+    smooth_max_delta_pos: float = float(os.getenv("VTS_SMOOTH_MAX_DELTA_POS", "0.06"))
+    smooth_max_delta_eye: float = float(os.getenv("VTS_SMOOTH_MAX_DELTA_EYE", "0.08"))
+    smooth_max_delta_mouth: float = float(os.getenv("VTS_SMOOTH_MAX_DELTA_MOUTH", "0.12"))
     
     # Animation Settings
     # เพิ่มความถี่การอัปเดตเพื่อลดอาการดีเลย์ใน lip sync
@@ -96,11 +105,25 @@ class VTubeStudioConfig:
     idle_motion_enabled: bool = True
     smooth_factor: float = 0.15
     movement_intensity: tuple = (0.3, 0.8)
-    
+
     # Movement Ranges
     head_rotation_range: tuple = (-15, 15)
     body_rotation_range: tuple = (-8, 8)
     eye_movement_speed: tuple = (1.0, 3.0)
+
+    # Lip Sync Settings
+    lipsync_chunk_ms: int = int(os.getenv("VTS_LIPSYNC_CHUNK_MS", "10"))
+    lipsync_attack: float = float(os.getenv("VTS_LIPSYNC_ATTACK", "0.8"))
+    lipsync_release: float = float(os.getenv("VTS_LIPSYNC_RELEASE", "0.6"))
+    lipsync_gain: float = float(os.getenv("VTS_LIPSYNC_GAIN", "2.0"))
+    lipsync_silence_threshold: float = float(os.getenv("VTS_LIPSYNC_SILENCE_TH", "0.03"))
+    lipsync_silence_chunks: int = int(os.getenv("VTS_LIPSYNC_SILENCE_CHUNKS", "4"))
+    lipsync_pause_min: float = float(os.getenv("VTS_LIPSYNC_PAUSE_MIN", "0.12"))
+    lipsync_pause_max: float = float(os.getenv("VTS_LIPSYNC_PAUSE_MAX", "0.18"))
+    lipsync_open_threshold: float = float(os.getenv("VTS_LIPSYNC_OPEN_TH", "0.22"))
+    lipsync_close_threshold: float = float(os.getenv("VTS_LIPSYNC_CLOSE_TH", "0.12"))
+    lipsync_min_open_ms: int = int(os.getenv("VTS_LIPSYNC_MIN_OPEN_MS", "60"))
+    lipsync_min_close_ms: int = int(os.getenv("VTS_LIPSYNC_MIN_CLOSE_MS", "40"))
     
 @dataclass
 class DiscordConfig:

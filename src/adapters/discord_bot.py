@@ -513,7 +513,7 @@ class DiscordBotAdapter:
             self.is_recording = prev_recording
 
     async def _lipsync_for_playback(self, audio_source: 'NumpyAudioSource'):
-        """ขับเคลื่อนลิปซิงค์ตามเฟรม 20ms ที่ Discord เล่นจริง"""
+        """ขับเคลื่อนลิปซิงค์แบบ realtime ตามเสียงที่เล่นจริง"""
         try:
             # รอจนเริ่มเล่นจริงเพื่อซิงค์เวลาให้ตรงที่สุด
             for _ in range(50):
@@ -526,106 +526,79 @@ class DiscordBotAdapter:
                 return
 
             sr = 48000
-            chunk = 960  # 20ms per frame
-            ema = 0.0
-            attack = 0.6
-            release = 0.12
-            scale = 1.4
-            silence_rms = 0.02  # เกณฑ์เสียงเงียบโดยประมาณสำหรับ float [-1,1]
+            chunk = 480  # 10ms chunks สำหรับ response ที่ดีขึ้น
 
-            # Smoothing สำหรับ MouthForm ให้รูปปากดูเป็นธรรมชาติ
-            form_ema = 0.5
-            form_attack = 0.5
-            form_release = 0.2
+            # ✅ ปรับค่า smoothing ให้เร็วและตอบสนองดีขึ้น
+            ema = 0.0
+            attack = 0.85   # เปิดปากเร็ว
+            release = 0.75  # ปิดปากเร็ว (แก้ไขจาก 0.12)
+            scale = 1.6     # เพิ่มการอ้าปาก
+
+            # ✅ Silence detection ที่แม่นยำขึ้น
+            silence_threshold = 0.015
+            consecutive_silent = 0
+            max_silent_chunks = 3  # ปิดปากเร็วหลังเงียบ 30ms
 
             i = 0
             mouth_open = 0.0
+            last_mouth = 0.0
             while self.voice_client and self.voice_client.is_playing() and i < samples.size:
                 seg = samples[i:i+chunk]
                 if seg.size == 0:
                     break
 
-                seg_f = seg.astype(np.float32)
-                rms = float(np.sqrt(np.mean(seg_f ** 2)))
-                # ปรับ normalization สำหรับ float PCM [-1,1]
-                vol = min(max(rms / 0.2, 0.0), 1.0)
-
-                if vol > ema:
-                    ema = attack * vol + (1 - attack) * ema
+                # คำนวณ RMS และตอบสนองแบบ realtime
+                rms = float(np.sqrt(np.mean(seg.astype(np.float32) ** 2)))
+                
+                # ✅ ตรวจจับเงียบ
+                if rms < silence_threshold:
+                    consecutive_silent += 1
                 else:
-                    ema = release * vol + (1 - release) * ema
+                    consecutive_silent = 0
 
-                mouth_open = max(0.0, min(1.0, ema * scale))
-                # ถ้าเฟรมเงียบมาก ให้ลดการอ้าปากลงเพื่อความเป็นธรรมชาติ
-                if rms < silence_rms:
-                    mouth_open = max(0.0, mouth_open * 0.4)
-                try:
-                    await self.motion_controller.set_parameter_value("MouthOpen", mouth_open, immediate=False)
-                except Exception:
-                    pass
-
-                # เพิ่ม MouthForm ตามลักษณะสเปกตรัมแบบง่าย ๆ
-                try:
-                    # คำนวณ spectral centroid
-                    nfft = 1024
-                    if seg_f.size < nfft:
-                        pad = np.zeros(nfft - seg_f.size, dtype=np.float32)
-                        x = np.concatenate([seg_f, pad])
+                # ✅ ปิดปากทันทีเมื่อเงียบ
+                if consecutive_silent >= max_silent_chunks:
+                    mouth_open = 0.0
+                    ema = 0.0
+                else:
+                    # Normalize volume ให้ sensitive ขึ้น
+                    vol = min(rms / 0.15, 1.0)
+                    
+                    # Smoothing
+                    if vol > ema:
+                        ema = attack * vol + (1 - attack) * ema
                     else:
-                        x = seg_f[:nfft]
-                    spec = np.abs(np.fft.rfft(x))
-                    freqs = np.fft.rfftfreq(x.size, d=1.0/sr)
-                    spec_sum = float(spec.sum())
-                    centroid = float((spec * freqs).sum() / spec_sum) if spec_sum > 1e-8 else 0.0
+                        ema = release * vol + (1 - release) * ema
+                    
+                    # ✅ เพิ่ม micro-variation ให้ดูเป็นธรรมชาติ
+                    variation = float(np.random.uniform(0.95, 1.05))
+                    mouth_open = max(0.0, min(1.0, ema * scale * variation))
 
-                    # zero-crossing rate (ประมาณพยัญชนะฟู่/ลม)
-                    zc = np.mean(np.abs(np.diff(np.signbit(seg_f)))) if seg_f.size > 1 else 0.0
-
-                    # map เป็น MouthForm
-                    if rms < silence_rms:
-                        form_target = 0.05  # ปากเกือบปิด
-                    elif centroid < 2500.0 and rms >= silence_rms * 1.5:
-                        form_target = 0.75  # สระเปิด (อา)
-                    elif centroid < 4500.0:
-                        form_target = 0.55  # สระกลาง
-                    else:
-                        form_target = 0.25  # พยัญชนะเสียงฟู่/ลม -> ปากแคบ
-
-                    # ปรับด้วย zc เล็กน้อยให้พยัญชนะฝืดแคบลง
-                    form_target = max(0.1, min(0.9, form_target - 0.1 * float(zc)))
-
-                    # smoothing
-                    if form_target > form_ema:
-                        form_ema = form_attack * form_target + (1 - form_attack) * form_ema
-                    else:
-                        form_ema = form_release * form_target + (1 - form_release) * form_ema
-
-                    # variation เบา ๆ เพื่อหลีกเลี่ยงความเป็นหุ่นยนต์
-                    jitter = 0.02
-                    mouth_form = max(0.0, min(1.0, form_ema + np.random.uniform(-jitter, jitter)))
-                    await self.motion_controller.set_parameter_value("MouthForm", mouth_form, immediate=False)
-                except Exception:
-                    # ถ้าไม่มี MouthForm หรือเกิดข้อผิดพลาดด้าน FFT ให้ข้าม
-                    pass
+                # ✅ ส่งเฉพาะเมื่อเปลี่ยนแปลงมากพอ (ลด jitter)
+                if abs(mouth_open - last_mouth) > 0.03:
+                    try:
+                        await self.motion_controller.set_parameter_value(
+                            "MouthOpen", mouth_open, immediate=False
+                        )
+                        last_mouth = mouth_open
+                    except Exception:
+                        pass
 
                 i += chunk
                 await asyncio.sleep(chunk / sr)
 
-            # ปิดปากอย่างนิ่มนวลเมื่อจบ
+            # ปิดปากอย่างนุ่มนวล
             try:
-                for t in np.linspace(mouth_open, 0.0, num=5):
-                    await self.motion_controller.set_parameter_value("MouthOpen", float(t), immediate=False)
-                    await asyncio.sleep(0.01)
+                steps = 4
+                for step in range(steps):
+                    val = last_mouth * (1 - (step + 1) / steps)
+                    await self.motion_controller.set_parameter_value("MouthOpen", val, immediate=False)
+                    await asyncio.sleep(0.015)
                 await self.motion_controller.set_parameter_value("MouthOpen", 0.0)
-                # รีเซ็ตรูปปากกลับค่ากลาง ๆ
-                try:
-                    await self.motion_controller.set_parameter_value("MouthForm", 0.5, immediate=False)
-                except Exception:
-                    pass
             except Exception:
                 pass
         except Exception as e:
-            logger.debug(f"Lipsync coroutine error: {e}")
+            logger.debug(f"Lipsync error: {e}")
     
     async def start(self):
         """Start bot"""

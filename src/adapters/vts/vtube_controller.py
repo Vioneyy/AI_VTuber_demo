@@ -29,18 +29,38 @@ class AnimationState(Enum):
     SPEAKING = "speaking"
 
 class SmoothValue:
-    """คลาสสำหรับทำให้ค่าเคลื่อนไหวนุ่มนวล"""
-    def __init__(self, initial_value: float = 0.0, smooth_factor: float = 0.15):
+    """คลาสสำหรับทำให้ค่าเคลื่อนไหวนุ่มนวล พร้อม guard จำกัด delta ต่อเฟรม"""
+    def __init__(
+        self,
+        initial_value: float = 0.0,
+        smooth_factor: float = 0.15,
+        use_guard: bool = False,
+        max_delta: float = None,
+        snap_epsilon: float = 1e-3,
+    ):
         self.current = initial_value
         self.target = initial_value
         self.smooth_factor = smooth_factor
+        self.use_guard = use_guard
+        self.max_delta = max_delta
+        self.snap_epsilon = snap_epsilon
     
     def set_target(self, value: float):
         self.target = value
     
     def update(self) -> float:
         diff = self.target - self.current
-        self.current += diff * self.smooth_factor
+        # ถ้าเข้าใกล้เป้าหมายมากแล้ว ให้ snap เพื่อกัน jitter
+        if abs(diff) < self.snap_epsilon:
+            self.current = self.target
+            return self.current
+        delta = diff * self.smooth_factor
+        if self.use_guard and self.max_delta is not None:
+            if delta > self.max_delta:
+                delta = self.max_delta
+            elif delta < -self.max_delta:
+                delta = -self.max_delta
+        self.current += delta
         return self.current
 
 class VTubeStudioController:
@@ -59,19 +79,25 @@ class VTubeStudioController:
         # Available parameters (ดึงจาก VTS)
         self.available_parameters: Dict[str, Dict] = {}
         
-        # Smooth values
+        # Smooth values + guard
         smooth_factor = config.vtube.smooth_factor
+        use_guard = getattr(config.vtube, 'smoothness_guard', True)
+        max_angle = getattr(config.vtube, 'smooth_max_delta_angle', 0.08)
+        max_pos = getattr(config.vtube, 'smooth_max_delta_pos', 0.06)
+        max_eye = getattr(config.vtube, 'smooth_max_delta_eye', 0.08)
+        max_mouth = getattr(config.vtube, 'smooth_max_delta_mouth', 0.12)
+
         self.smooth_values = {
-            'FaceAngleX': SmoothValue(0, smooth_factor),
-            'FaceAngleY': SmoothValue(0, smooth_factor),
-            'FaceAngleZ': SmoothValue(0, smooth_factor),
-            'FacePositionX': SmoothValue(0, smooth_factor),
-            'FacePositionY': SmoothValue(0, smooth_factor),
-            'EyeLeftX': SmoothValue(0, smooth_factor),
-            'EyeLeftY': SmoothValue(0, smooth_factor),
-            'EyeRightX': SmoothValue(0, smooth_factor),
-            'EyeRightY': SmoothValue(0, smooth_factor),
-            'MouthOpen': SmoothValue(0, smooth_factor * 2),
+            'FaceAngleX': SmoothValue(0, smooth_factor, use_guard, max_angle),
+            'FaceAngleY': SmoothValue(0, smooth_factor, use_guard, max_angle),
+            'FaceAngleZ': SmoothValue(0, smooth_factor, use_guard, max_angle),
+            'FacePositionX': SmoothValue(0, smooth_factor, use_guard, max_pos),
+            'FacePositionY': SmoothValue(0, smooth_factor, use_guard, max_pos),
+            'EyeLeftX': SmoothValue(0, smooth_factor, use_guard, max_eye),
+            'EyeLeftY': SmoothValue(0, smooth_factor, use_guard, max_eye),
+            'EyeRightX': SmoothValue(0, smooth_factor, use_guard, max_eye),
+            'EyeRightY': SmoothValue(0, smooth_factor, use_guard, max_eye),
+            'MouthOpen': SmoothValue(0, smooth_factor * 2, use_guard, max_mouth),
         }
         
         # Movement parameters
@@ -99,7 +125,15 @@ class VTubeStudioController:
         # ✅ ควบคุมการ reconnect ไม่ให้ถี่เกินไป
         self._reconnecting: bool = False
         self._last_reconnect_attempt_ts: float = 0.0
-        self._reconnect_min_interval: float = 2.0  # อย่างน้อย 2 วินาทีต่อครั้ง
+        self._reconnect_min_interval: float = 5.0  # อย่างน้อย 5 วินาทีต่อครั้ง
+
+        # ✅ ลดอัตราการส่งพารามิเตอร์ให้เนียนขึ้น (throttling + delta guard)
+        self._last_send_ts: float = 0.0
+        try:
+            self._min_send_interval: float = max(0.0, float(getattr(config.vtube, "send_min_interval_ms", 32)) / 1000.0)
+        except Exception:
+            self._min_send_interval = 0.032  # fallback 32ms
+        self._last_sent_values: Dict[str, float] = {}
         self._reconnect_fail_count: int = 0
     
     async def connect(self) -> bool:
@@ -107,11 +141,11 @@ class VTubeStudioController:
         try:
             logger.info("📡 กำลังเชื่อมต่อ VTube Studio...")
             
-            # ✅ แก้: เพิ่ม ping_interval และ close_timeout เพื่อไม่ให้หลุด
+            # ✅ ปรับ ping_interval/ping_timeout ให้สอดคล้องกับ _ensure_ws เพื่อลด false disconnect
             self.ws = await websockets.connect(
                 config.vtube.websocket_url,
-                ping_interval=10,  # ส่ง ping ทุก 10 วินาที (เดิม 20)
-                ping_timeout=30,   # รอ pong 30 วินาที (เดิม 10)
+                ping_interval=30,  # ส่ง ping ทุก 30 วินาที
+                ping_timeout=60,   # รอ pong 60 วินาที
                 close_timeout=5    # รอปิด 5 วินาที
             )
             logger.info("✅ WebSocket เชื่อมต่อสำเร็จ")
@@ -152,11 +186,12 @@ class VTubeStudioController:
     async def _ensure_ws(self) -> bool:
         """ตรวจสอบและเชื่อมต่อใหม่แบบปลอดภัย พร้อม backoff ป้องกัน reconnect ถี่"""
         try:
-            if self.ws and getattr(self.ws, 'state', None) and self.ws.state.name == 'OPEN':
+            # ✅ เช็คว่า WebSocket ยังเปิดอยู่หรือไม่ (ใช้ .open เพื่อลด false state)
+            if self.ws and getattr(self.ws, 'open', False):
                 return True
 
             now = time.time()
-            # ถ้ากำลัง reconnect อยู่ หรือเพิ่ง reconnect ไปเมื่อไม่นาน ให้ข้าม
+            # ✅ เพิ่มระยะห่างระหว่าง reconnect ตามค่า min interval
             if self._reconnecting or (now - self._last_reconnect_attempt_ts) < self._reconnect_min_interval:
                 return False
 
@@ -164,10 +199,19 @@ class VTubeStudioController:
             self._last_reconnect_attempt_ts = now
             logger.debug("🔁 WebSocket not open, attempting safe reconnect…")
 
+            # ✅ ปิดการเชื่อมต่อเก่าก่อน (ถ้ามี) เพื่อลดปัญหา state ค้าง
+            if self.ws:
+                try:
+                    await self.ws.close()
+                except:
+                    pass
+                self.ws = None
+
+            # ✅ Reconnect ใหม่ พร้อมเพิ่ม ping interval/timeout
             self.ws = await websockets.connect(
                 config.vtube.websocket_url,
-                ping_interval=20,   # ผ่อนปรนขึ้นเพื่อลด false timeout
-                ping_timeout=40,
+                ping_interval=30,   # เพิ่มเป็น 30 วินาที
+                ping_timeout=60,    # เพิ่มเป็น 60 วินาที
                 close_timeout=5
             )
             await self._authenticate()
@@ -178,14 +222,15 @@ class VTubeStudioController:
                 self._reconnect_fail_count += 1
                 return False
             await self._get_available_parameters()
-            logger.info("✅ Reconnected VTS WebSocket (no new animation loop)")
+            logger.info("✅ Reconnected VTS WebSocket")
             self._reconnecting = False
             self._reconnect_fail_count = 0
             return True
         except Exception as e:
             self._reconnecting = False
             self._reconnect_fail_count += 1
-            logger.error(f"❌ Safe reconnect failed: {e}")
+            # ✅ Log ลดลงเหลือ debug เพื่อลดสแปม
+            logger.debug(f"Reconnect failed: {e}")
             return False
     
     async def _authenticate(self):
@@ -299,7 +344,7 @@ class VTubeStudioController:
         """ส่งค่าพารามิเตอร์ไปยัง VTS (แก้ไข: เช็ค connection ก่อนส่ง)"""
         if not self.authenticated or not self.model_loaded or not self.ws:
             return
-        
+
         # ✅ แก้: เช็คว่า websocket ยังเปิดอยู่หรือไม่
         try:
             # ใช้ safe reconnect พร้อม backoff ไม่ยิงถี่ทุกเฟรม
@@ -311,18 +356,27 @@ class VTubeStudioController:
         except Exception:
             # ถ้าเช็ค state ไม่ได้ ให้ลองส่งไปเลย
             pass
-        
+
+        # ✅ Throttling: จำกัดอัตราการส่งตามค่าใน config
+        now = time.time()
+        if (now - self._last_send_ts) < self._min_send_interval:
+            return
+
         try:
             valid_params = []
+            # ✅ Delta guard: ส่งเฉพาะพารามิเตอร์ที่เปลี่ยนมากพอ
+            delta_threshold = 0.003
             for param_name, value in parameters.items():
                 if param_name in self.available_parameters:
                     param_info = self.available_parameters[param_name]
                     clamped_value = max(param_info['min'], min(param_info['max'], value))
-                    valid_params.append({
-                        "id": param_name,
-                        "value": clamped_value
-                    })
-            
+                    last_val = self._last_sent_values.get(param_name, None)
+                    if last_val is None or abs(clamped_value - last_val) >= delta_threshold:
+                        valid_params.append({
+                            "id": param_name,
+                            "value": clamped_value
+                        })
+
             if not valid_params:
                 return
             
@@ -345,8 +399,12 @@ class VTubeStudioController:
             except asyncio.TimeoutError:
                 logger.debug("⚠️ Send timeout (ignored)")
                 return
-            
+
             # ✅ Debug: นับจำนวนครั้งที่ส่ง
+            # อัพเดท timestamp และค่าที่ส่งล่าสุด
+            self._last_send_ts = now
+            for p in valid_params:
+                self._last_sent_values[p["id"]] = p["value"]
             self._param_send_count += 1
             current_time = time.time()
             if current_time - self._last_param_time >= 5.0:
@@ -366,10 +424,11 @@ class VTubeStudioController:
         final_intensity = base_intensity * self.movement_intensity * intensity_mult
         
         # สร้างค่าเป้าหมาย
+        angle_min, angle_max = config.vtube.head_rotation_range
         movements = {
-            'FaceAngleX': random.uniform(-12, 12) * final_intensity,
-            'FaceAngleY': random.uniform(-20, 20) * final_intensity,
-            'FaceAngleZ': random.uniform(-10, 10) * final_intensity,
+            'FaceAngleX': random.uniform(angle_min, angle_max) * final_intensity,
+            'FaceAngleY': random.uniform(angle_min, angle_max) * final_intensity,
+            'FaceAngleZ': random.uniform(angle_min, angle_max) * final_intensity,
             'FacePositionX': random.uniform(-5, 5) * final_intensity * 0.5,
             'FacePositionY': 0,
             'EyeLeftX': random.uniform(-1, 1),
@@ -435,6 +494,7 @@ class VTubeStudioController:
                 # อัพเดทค่าทั้งหมด
                 current_values = {}
                 for param_name, smooth_value in self.smooth_values.items():
+                    # รวม MouthOpen ด้วย เพื่อให้ค่าจาก lipsync ถูกส่งผ่าน loop อย่างสม่ำเสมอ
                     current_values[param_name] = smooth_value.update()
                 
                 # ส่งไป VTS
@@ -479,22 +539,50 @@ class VTubeStudioController:
                     
                 audio = np.frombuffer(audio_bytes, dtype=np.int16)
                 
-                # ✅ แก้: ลด chunk size เพื่อให้ตอบสนองเร็วขึ้น
-                chunk_size = max(1, int(sample_rate * 0.01))  # 10ms (เดิม 20ms)
+                # ✅ ปรับตามคอนฟิก: ขนาดชิ้นเสียงสำหรับ lipsync
+                chunk_ms = max(5, int(getattr(config.vtube, 'lipsync_chunk_ms', 10)))
+                chunk_size = max(1, int(sample_rate * (chunk_ms / 1000.0)))
                 
                 ema = 0.0
-                # ✅ ปรับให้ปิดปากเร็วขึ้นและเปิดเร็วพอ
-                attack = 0.8    # เปิดปากเร็ว
-                release = 0.6   # ปิดปากเร็วขึ้น (เดิม 0.2)
+                # ✅ ปรับตามคอนฟิก: attack/release เพื่อความเนียน
+                attack = float(getattr(config.vtube, 'lipsync_attack', 0.8))
+                release = float(getattr(config.vtube, 'lipsync_release', 0.6))
 
                 # ✅ เพิ่มตัวตรวจจับช่วงเงียบ เพื่อปิดปากทันทีเมื่อเงียบสั้นๆ (normalize เป็น 0..1)
-                silence_threshold = 0.03   # RMS (normalized) ที่ถือว่าเงียบ
-                silence_chunks_needed = 4  # 4 ชิ้นเสียง ~ 40ms
+                silence_threshold = float(getattr(config.vtube, 'lipsync_silence_threshold', 0.03))
+                silence_chunks_needed = int(getattr(config.vtube, 'lipsync_silence_chunks', 4))
                 silence_chunks = 0
+
+                # ✅ Hysteresis gate: แยกเกณฑ์เปิด/ปิด และกำหนดค้างปากขั้นต่ำ
+                open_th = float(getattr(config.vtube, 'lipsync_open_threshold', 0.22))
+                close_th = float(getattr(config.vtube, 'lipsync_close_threshold', 0.12))
+                min_open_ms = int(getattr(config.vtube, 'lipsync_min_open_ms', 60))
+                min_close_ms = int(getattr(config.vtube, 'lipsync_min_close_ms', 40))
+                mouth_is_open = False
+                time_since_open_ms = 0
+                time_since_close_ms = 0
+
+                # ✅ Dynamic noise floor จาก 200ms แรก เพื่อลดการเปิดปากจาก noise
+                import numpy as np
+                pre_samples = max(chunk_size, int(sample_rate * 0.2))
+                pre = audio[:pre_samples].astype(np.float32)
+                if pre.size > 0:
+                    norm_pre = pre / 32767.0
+                    win_pre = np.hanning(norm_pre.size)
+                    spec_pre = np.fft.rfft(norm_pre * win_pre)
+                    freqs_pre = np.fft.rfftfreq(norm_pre.size, d=1.0 / sample_rate)
+                    band_pre = (freqs_pre >= 300) & (freqs_pre <= 3400)
+                    band_energy_pre = np.sqrt(np.mean(np.abs(spec_pre[band_pre]) ** 2)) if np.any(band_pre) else 0.0
+                    rms_pre = float(np.sqrt(np.mean(norm_pre ** 2)))
+                    baseline_energy = 0.7 * band_energy_pre + 0.3 * rms_pre
+                else:
+                    baseline_energy = 0.0
 
                 # ✅ จังหวะหยุดคล้ายพยางค์ เพื่อให้ดูเหมือนพูดจริง
                 since_last_pause = 0.0
-                next_pause_interval = random.uniform(0.12, 0.18)  # วินาที
+                pause_min = float(getattr(config.vtube, 'lipsync_pause_min', 0.12))
+                pause_max = float(getattr(config.vtube, 'lipsync_pause_max', 0.18))
+                next_pause_interval = random.uniform(pause_min, pause_max)
 
                 frame_count = 0
                 last_mouth_value = 0.0
@@ -507,10 +595,20 @@ class VTubeStudioController:
                     if chunk.size == 0:
                         continue
                         
-                    # ✅ คำนวณ volume ที่แม่นยำขึ้น (normalize int16 → 0..1)
+                    # ✅ คำนวณ volume ที่แม่นยำขึ้น: เน้นพลังงานย่านเสียงพูด (300–3400 Hz)
                     norm = chunk / 32767.0
+                    # windowing
+                    win = np.hanning(norm.size)
+                    spec = np.fft.rfft(norm * win)
+                    freqs = np.fft.rfftfreq(norm.size, d=1.0 / sample_rate)
+                    band = (freqs >= 300) & (freqs <= 3400)
+                    band_energy = np.sqrt(np.mean(np.abs(spec[band]) ** 2)) if np.any(band) else 0.0
+                    # รวมกับ RMS เล็กน้อยเพื่อความเสถียร
                     rms = float(np.sqrt(np.mean(norm ** 2)))
-                    volume = min(rms * 3.0, 1.0)
+                    energy_raw = 0.7 * band_energy + 0.3 * rms
+                    # ✅ หัก noise floor เล็กน้อย (เผื่อ/ขยาย 10%) แล้วคูณ gain
+                    energy = max(0.0, energy_raw - baseline_energy * 1.1)
+                    volume = min(energy * float(getattr(config.vtube, 'lipsync_gain', 2.0)), 1.0)
                     
                     # ✅ นับช่วงเงียบ
                     if rms < silence_threshold:
@@ -524,21 +622,35 @@ class VTubeStudioController:
                     else:
                         ema = release * volume + (1 - release) * ema
 
-                    # ✅ ปรับค่าให้เปิดปากมากขึ้น และมีความหลากหลาย
-                    base_mouth = ema * 2.0
-                    
-                    # ✅ เพิ่ม variation ตามพยัญชนะ/สระ
-                    if base_mouth > 0.3:
-                        # เพิ่มการสั่นเล็กน้อย
-                        variation = random.uniform(0.9, 1.15)
-                        mouth_open = base_mouth * variation
+                    # ✅ Hysteresis gating: เปิด/ปิดปากแบบมีเกณฑ์และช่วงคงปากขั้นต่ำ
+                    if mouth_is_open:
+                        time_since_open_ms += chunk_ms
+                        if ema < close_th and time_since_open_ms >= min_open_ms:
+                            mouth_is_open = False
+                            time_since_close_ms = 0
                     else:
-                        mouth_open = base_mouth
+                        time_since_close_ms += chunk_ms
+                        if ema > open_th and time_since_close_ms >= min_close_ms:
+                            mouth_is_open = True
+                            time_since_open_ms = 0
+
+                    base_mouth = ema
+                    if mouth_is_open:
+                        # เพิ่ม variation เล็กน้อยเฉพาะเสียงดังพอ เพื่อกันสั่นในเสียงเบา
+                        if base_mouth > 0.4:
+                            variation = random.uniform(0.97, 1.06)
+                            mouth_open = base_mouth * variation
+                        else:
+                            mouth_open = base_mouth
+                    else:
+                        mouth_open = 0.0
 
                     # ✅ หากเงียบเพียงพอ ให้ปิดปากทันที (กันอ้าค้าง)
                     if silence_chunks >= silence_chunks_needed:
                         mouth_open = 0.0
                         ema = max(0.0, ema * 0.5)  # เร่งการปิดด้วยการลด EMA
+                        mouth_is_open = False
+                        time_since_close_ms = 0
                     
                     mouth_open = max(0.0, min(1.0, mouth_open))
                     
@@ -547,7 +659,7 @@ class VTubeStudioController:
                     if since_last_pause >= next_pause_interval and mouth_open > 0.35:
                         mouth_open = max(0.0, mouth_open - 0.15)
                         since_last_pause = 0.0
-                        next_pause_interval = random.uniform(0.12, 0.18)
+                        next_pause_interval = random.uniform(pause_min, pause_max)
 
                     # ✅ ป้องกันการค้างที่ค่าเดิม
                     if abs(mouth_open - last_mouth_value) > 0.02:
@@ -612,6 +724,10 @@ class VTubeStudioController:
 
             # ส่งทันทีเฉพาะเมื่อจำเป็น และแน่ใจว่า ws พร้อม
             if immediate and self.authenticated and self.model_loaded:
+                # ✅ Throttling สำหรับ single param
+                now = time.time()
+                if (now - self._last_send_ts) < self._min_send_interval:
+                    return
                 ok = await self._ensure_ws()
                 if not ok or not self.ws:
                     logger.debug("⚠️ Cannot send param: WebSocket not ready")
@@ -626,6 +742,8 @@ class VTubeStudioController:
                     }
                 }
                 await self.ws.send(json.dumps(req))
+                self._last_send_ts = now
+                self._last_sent_values[param_name] = clamped
         except Exception as e:
             logger.debug(f"Set param error: {e}")
     
