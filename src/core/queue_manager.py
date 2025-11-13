@@ -64,7 +64,7 @@ class SmartQueueManager:
         self.total_errors = 0
         self.last_process_time = 0
         
-        logger.info("✅ Queue Manager initialized")
+        logger.debug("✅ Queue Manager initialized")
     
     async def add_to_queue(
         self, 
@@ -140,7 +140,7 @@ class SmartQueueManager:
         # เพิ่มเข้า queue
         try:
             await self.queue.put(item)
-            logger.info(
+            logger.debug(
                 f"📥 Added to queue: [{item.source}] {item.user_name}: "
                 f"{item.content[:40]}... (Priority: {Priority(priority).name}, "
                 f"Queue size: {self.queue.qsize()})"
@@ -161,7 +161,7 @@ class SmartQueueManager:
             processor_callback: Async function ที่จะประมวลผล item
                                 รูปแบบ: async def process(item: QueueItem) -> None
         """
-        logger.info("🔄 Queue processing started")
+        logger.debug("🔄 Queue processing started")
         
         while True:
             try:
@@ -186,12 +186,9 @@ class SmartQueueManager:
                     
                     start_time = time.time()
                     
-                    logger.info(
-                        f"\n{'='*60}\n"
-                        f"🔄 Processing [{item.source}] from {item.user_name}\n"
-                        f"📝 Content: {item.content[:80]}...\n"
-                        f"⏱️  Queue size: {self.queue.qsize()}\n"
-                        f"{'='*60}"
+                    # ลดรูปแบบ output ให้กระชับและไม่สแปม
+                    logger.debug(
+                        f"🔄 Processing [{item.source}] {item.user_name} | size={self.queue.qsize()} | text='{item.content[:80]}'"
                     )
                     
                     try:
@@ -202,8 +199,8 @@ class SmartQueueManager:
                         self.total_processed += 1
                         self.last_process_time = time.time() - start_time
                         
-                        logger.info(
-                            f"✅ Processed successfully in {self.last_process_time:.2f}s"
+                        logger.debug(
+                            f"✅ Processed in {self.last_process_time:.2f}s"
                         )
                         
                     except Exception as e:
@@ -224,7 +221,7 @@ class SmartQueueManager:
                 logger.error(f"❌ Error in queue loop: {e}", exc_info=True)
                 await asyncio.sleep(1)
         
-        logger.info("👋 Queue processing stopped")
+        logger.debug("👋 Queue processing stopped")
     
     def get_status(self) -> dict:
         """

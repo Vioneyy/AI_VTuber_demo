@@ -101,7 +101,7 @@ class VTubeStudioConfig:
     # Animation Settings
     # เพิ่มความถี่การอัปเดตเพื่อลดอาการดีเลย์ใน lip sync
     # อนุญาตให้ตั้งผ่าน .env: VTS_IDLE_UPDATE_RATE (เช่น 0.05 สำหรับ ~20 FPS)
-    idle_update_rate: float = float(os.getenv("VTS_IDLE_UPDATE_RATE", "0.02"))
+    idle_update_rate: float = float(os.getenv("VTS_IDLE_UPDATE_RATE", "0.05"))
     # เปิดการขยับสุ่มตอน idle (ปิดได้ผ่าน .env ถ้าต้องการ)
     idle_motion_enabled: bool = True
     smooth_factor: float = 0.15
@@ -125,6 +125,8 @@ class VTubeStudioConfig:
     lipsync_close_threshold: float = float(os.getenv("VTS_LIPSYNC_CLOSE_TH", "0.12"))
     lipsync_min_open_ms: int = int(os.getenv("VTS_LIPSYNC_MIN_OPEN_MS", "60"))
     lipsync_min_close_ms: int = int(os.getenv("VTS_LIPSYNC_MIN_CLOSE_MS", "40"))
+    # ควบคุมการเปลี่ยนรูปปาก MouthForm ระหว่างลิปซิงค์ (ค่าเริ่มต้น: ปิดเพื่อลด jitter)
+    lipsync_enable_mouthform_variation: bool = os.getenv("VTS_LIPSYNC_ENABLE_MOUTHFORM_VARIATION", "false").lower() == "true"
     
 @dataclass
 class DiscordConfig:

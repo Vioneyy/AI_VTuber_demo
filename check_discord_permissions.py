@@ -6,8 +6,14 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# โหลด .env จากรูทโปรเจกต์ให้ชัดเจน
+ENV_PATH = Path(__file__).parent / ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=str(ENV_PATH), override=False)
+else:
+    load_dotenv()
 
 # Required permissions for voice bot
 REQUIRED_PERMISSIONS = {

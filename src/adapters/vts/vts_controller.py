@@ -26,14 +26,11 @@ class VTSController:
     
     async def update_idle_motion(self):
         """อัพเดท idle motion"""
-        await self._controller.set_state(AnimationState.IDLE)
+        await self._controller.update_idle_motion()
     
     async def set_talking(self, talking: bool):
         """ตั้งสถานะกำลังพูด"""
-        if talking:
-            await self._controller.set_state(AnimationState.SPEAKING)
-        else:
-            await self._controller.set_state(AnimationState.IDLE)
+        await self._controller.set_talking(talking)
     
     async def start_speaking(self, text: str):
         """เริ่มพูด"""

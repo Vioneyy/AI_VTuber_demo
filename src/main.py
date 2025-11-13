@@ -7,6 +7,8 @@ import logging
 import signal
 import sys
 from pathlib import Path
+from logging.handlers import QueueHandler, QueueListener
+import queue as _log_queue
 import io
 import os
 import numpy as np
@@ -33,14 +35,81 @@ try:
 except Exception:
     utf8_stdout = sys.stdout
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler(str(Path(core_config.system.log_dir) / 'ai_vtuber.log'), encoding='utf-8'),
-        logging.StreamHandler(utf8_stdout)
-    ]
-)
+logging.basicConfig(level=logging.INFO)  # root level INFO; per-logger levels will filter noise
+
+# Queue-based logging to avoid event-loop stalls on I/O
+LOG_QUEUE_LISTENER = None
+try:
+    log_queue = _log_queue.Queue(maxsize=1000)
+    root_logger = logging.getLogger()
+
+    # Handlers processed by background listener
+    stream_handler = logging.StreamHandler(utf8_stdout)
+    # แสดงเฉพาะ WARNING ขึ้นไปบน console เพื่อลด noise
+    stream_handler.setLevel(logging.WARNING)
+    # ใช้ฟอร์แมตที่กระชับสำหรับ terminal
+    stream_handler.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+
+    # เพิ่มช่องทาง INFO เฉพาะบรรทัดสำคัญ (ใช้ extra={'console': True})
+    class ConsoleInfoFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return bool(getattr(record, 'console', False))
+
+    console_info_handler = logging.StreamHandler(utf8_stdout)
+    console_info_handler.setLevel(logging.INFO)
+    console_info_handler.setFormatter(logging.Formatter('%(message)s'))
+    console_info_handler.addFilter(ConsoleInfoFilter())
+
+    file_handler = logging.FileHandler(str(Path(core_config.system.log_dir) 
+                                           / 'ai_vtuber.log'), encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+
+    # Remove any direct handlers attached by basicConfig
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    # Attach queue handler to root
+    queue_handler = QueueHandler(log_queue)
+    queue_handler.setLevel(logging.DEBUG)
+    root_logger.addHandler(queue_handler)
+
+    # Start listener (background thread does actual I/O)
+    # เริ่ม QueueListener โดยเคารพระดับของ handler
+    # stream: WARNING (ข้อความเตือน/ผิดพลาดเท่านั้น)
+    # file: INFO (เก็บรายละเอียดทั้งหมด)
+    # console_info_handler: INFO เฉพาะบรรทัดที่ติดธง extra={'console': True}
+    LOG_QUEUE_LISTENER = QueueListener(log_queue, file_handler, stream_handler, console_info_handler, respect_handler_level=True)
+    LOG_QUEUE_LISTENER.start()
+except Exception:
+    LOG_QUEUE_LISTENER = None
+
+# หมายเหตุ: ระดับของ stream/file ถูกตั้งไว้ข้างต้นก่อนเริ่ม QueueListener แล้ว
+
+# ลดสแปม log จากไลบรารีภายนอกที่สร้างข้อความบ่อย
+# เช่น httpx/pytchat/websockets ที่มักจะพิมพ์ HTTP Request/Connection
+for noisy_logger in [
+    "httpx",
+    "pytchat",
+    "websockets",
+    "websockets.client",
+    "websockets.server",
+]:
+    try:
+        nl = logging.getLogger(noisy_logger)
+        nl.setLevel(logging.WARNING)
+        # ปิดการ propagate เพื่อไม่ให้เด้งขึ้น root handlers
+        nl.propagate = False
+    except Exception:
+        pass
+
+# เพิ่ม debug เฉพาะโมดูล VTS เพื่อดูจังหวะส่งพารามิเตอร์ (ปล่อยให้ propagate ไปยัง root QueueHandler)
+try:
+    vts_logger = logging.getLogger("adapters.vts.vtube_controller")
+    vts_logger.setLevel(logging.DEBUG)
+    vts_logger.propagate = True
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +131,11 @@ class JeedAIVTuber:
         # YouTube Live
         self.youtube_task = None
         self.youtube_chat = None
+        # แจ้ง YouTube connect ครั้งแรกที่ระดับ INFO ครั้งถัดไปเป็น DEBUG
+        self._yt_connected_once = False
+        # เก็บ comment IDs ที่อ่านไปแล้ว เพื่อกันการอ่านซ้ำข้ามรอบ
+        self._yt_seen_ids = set()
+        self._yt_read_once = False
         
         # Tasks
         self.tasks = []
@@ -264,6 +338,8 @@ class JeedAIVTuber:
             try:
                 yt_cfg = getattr(self.config, 'youtube', None)
                 if yt_cfg and getattr(yt_cfg, 'enabled', False):
+                    # อ่านนโยบายการอ่านคอมเมนต์ (ครั้งเดียว)
+                    self._yt_read_once = bool(getattr(yt_cfg, 'read_comment_once', True))
                     raw_id = getattr(yt_cfg, 'stream_id', '') or getattr(yt_cfg, 'video_id', '')
                     if raw_id:
                         self.youtube_task = asyncio.create_task(
@@ -345,6 +421,15 @@ class JeedAIVTuber:
 
         logger.info("👋 ระบบหยุดแล้ว")
         logger.info("👋 บ๊ายบาย~")
+
+        # หยุด QueueListener ของระบบ log (ถ้ามี) เพื่อปิด thread อย่างเรียบร้อย
+        try:
+            global LOG_QUEUE_LISTENER
+            if LOG_QUEUE_LISTENER:
+                LOG_QUEUE_LISTENER.stop()
+                LOG_QUEUE_LISTENER = None
+        except Exception:
+            pass
 
     async def _run_discord_bot_supervisor(self):
         """รัน Discord bot และรีสตาร์ทอัตโนมัติเมื่อหลุดด้วยโค้ด 4006/ข้อผิดพลาดชั่วคราว"""
@@ -492,13 +577,6 @@ class JeedAIVTuber:
             # 4) Play audio in Discord
             sample_rate = tts_sample_rate or core_config.tts.sample_rate
             if self.discord_bot and self.discord_bot.voice_client:
-                # เริ่มพูด: ให้ DiscordBotAdapter ขับ lipsync จากสตรีมที่เล่นโดยตรง
-                if self.vts_client:
-                    try:
-                        await self.vts_client.set_talking(True)
-                    except Exception:
-                        pass
-
                 # ✅ เล่นเสียง (non-blocking แล้ว)
                 await self.discord_bot.play_audio(audio_data, sample_rate)
 
@@ -510,10 +588,6 @@ class JeedAIVTuber:
                             f"🎮 VTS After playback: running={controller.running}, "
                             f"lip_sync_running={controller._lip_sync_running}"
                         )
-                        # Stop talking และกลับสู่ idle อย่างชัดเจน (ตัว bot ก็จะปิดด้วย)
-                        await self.vts_client.stop_speaking()
-                        await self.vts_client.update_idle_motion()
-                        logger.info("✅ VTS back to idle")
                     except Exception:
                         pass
                 logger.info("✅ Audio played successfully")
@@ -528,28 +602,56 @@ class JeedAIVTuber:
         try:
             yt_cfg = getattr(self.config, 'youtube', None)
             if not yt_cfg or not getattr(yt_cfg, 'enabled', False):
-                logger.info("ℹ️ YouTube Live ถูกปิดใช้งาน — ข้ามลูป YouTube")
+                logger.info("ℹ️ YouTube Live ถูกปิดใช้งาน — ข้ามลูป YouTube", extra={'console': True})
                 return
 
             raw_id = getattr(yt_cfg, 'stream_id', '') or getattr(yt_cfg, 'video_id', '')
             if not raw_id:
-                logger.info("ℹ️ YouTube Live ไม่มีค่า stream/video ID — ข้ามลูป YouTube")
+                logger.info("ℹ️ YouTube Live ไม่มีค่า stream/video ID — ข้ามลูป YouTube", extra={'console': True})
                 return
 
             video_id = self._normalize_youtube_id(raw_id)
-            logger.info(f"ℹ️ YouTube Live raw='{raw_id}' → normalized='{video_id}'")
+            logger.info(f"📺 เริ่มอ่าน YouTube Live: raw='{raw_id}' → id='{video_id}'", extra={'console': True})
 
             backoff = 5.0
             while self.running:
                 try:
                     self.youtube_chat = pytchat.create(video_id=video_id)
-                    logger.info(f"✅ เชื่อมต่อ YouTube Live: {video_id}")
+                    if not self._yt_connected_once:
+                        logger.info(f"✅ เชื่อมต่อ YouTube Live: {video_id}", extra={'console': True})
+                        self._yt_connected_once = True
+                    else:
+                        logger.debug(f"✅ เชื่อมต่อ YouTube Live: {video_id}")
 
                     interval = float(getattr(yt_cfg, 'check_interval', 5.0))
+                    max_batch = int(getattr(yt_cfg, 'max_comments_per_batch', 5))
                     while self.running and self.youtube_chat.is_alive():
                         try:
-                            items = self.youtube_chat.get().sync_items()
+                            # Backpressure guard: หากคิวแน่น ให้พักก่อนเพื่อไม่ให้ภาระไปกวน animation
+                            try:
+                                qsize = self.queue_manager.queue.qsize()
+                                qmax = getattr(self.queue_manager, 'max_size', 50)
+                            except Exception:
+                                qsize, qmax = 0, 50
+                            if qsize >= max(1, int(qmax * 0.7)):
+                                logger.info(f"⏸️  YouTube พักอ่านชั่วคราว (queue {qsize}/{qmax})", extra={'console': True})
+                                await asyncio.sleep(interval)
+                                continue
+
+                            # อ่านรายการคอมเมนต์ใน thread แยก เพื่อไม่บล็อค event loop หลัก
+                            # ห่อทั้ง get() และ sync_items() ใน thread แยก
+                            items = await asyncio.to_thread(lambda: self.youtube_chat.get().sync_items())
+                            processed = 0
                             for c in items:
+                                # จำกัดจำนวนต่อรอบเพื่อลดภาระและป้องกันการคิวสะสมมากเกิน
+                                if processed >= max_batch:
+                                    break
+                                # กันอ่านซ้ำ: ใช้ id ของคอมเมนต์ถ้ามี, ถ้าไม่มีก็ fallback เป็น tuple
+                                cid = getattr(c, 'id', None)
+                                if self._yt_read_once:
+                                    key = cid or (getattr(c.author, 'channelId', ''), getattr(c, 'message', ''), getattr(c, 'elapsedTime', None))
+                                    if key in self._yt_seen_ids:
+                                        continue
                                 msg = c.message
                                 user_id = c.author.channelId
                                 user_name = c.author.name
@@ -560,12 +662,20 @@ class JeedAIVTuber:
                                     user_name=user_name,
                                     priority=Priority.YOUTUBE
                                 )
+                                if self._yt_read_once:
+                                    self._yt_seen_ids.add(key)
+                                    # จำกัดขนาดชุดกันอ่านซ้ำเพื่อไม่ให้โตเกินไป
+                                    if len(self._yt_seen_ids) > 2000:
+                                        self._yt_seen_ids.clear()
+                                processed += 1
+                                # cooperative yield เพื่อให้ task อื่น (เช่น animation) ทำงานได้ต่อเนื่อง
+                                await asyncio.sleep(0)
                             await asyncio.sleep(interval)
                         except Exception as e:
                             logger.warning(f"⚠️ YouTube Chat Error: {e}")
                             await asyncio.sleep(max(3.0, interval))
 
-                    logger.info("👋 หยุดอ่านคอมเมนต์ YouTube Live")
+                    logger.info("👋 หยุดอ่านคอมเมนต์ YouTube Live", extra={'console': True})
                     break
                 except Exception as e:
                     logger.warning(f"⚠️ สร้าง YouTube chat client ล้มเหลว: {e}. จะลองใหม่ใน {backoff:.0f}s")
@@ -613,17 +723,11 @@ class JeedAIVTuber:
 async def main():
     """Main entry point"""
     vtuber = JeedAIVTuber()
-    
-    # Setup signal handlers
-    def signal_handler(sig, frame):
-        logger.info("🛑 รับ signal หยุดทำงาน")
-        asyncio.create_task(vtuber.stop())
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     try:
         await vtuber.start()
+    except KeyboardInterrupt:
+        logger.info("🛑 รับ Ctrl+C — กำลังหยุดระบบ…")
+        await vtuber.stop()
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}", exc_info=True)
         await vtuber.stop()

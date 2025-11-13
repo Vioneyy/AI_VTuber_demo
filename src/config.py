@@ -5,9 +5,15 @@ Configuration Manager
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from pathlib import Path
 
-# โหลด .env
-load_dotenv()
+# โหลด .env จากรูทโปรเจกต์ให้ชัดเจน
+BASE_DIR = Path(__file__).parent.parent
+ENV_PATH = BASE_DIR / ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=str(ENV_PATH), override=False)
+else:
+    load_dotenv()
 
 class Config:
     """Configuration class สำหรับ AI VTuber"""

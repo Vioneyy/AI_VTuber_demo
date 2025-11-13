@@ -484,10 +484,6 @@ class DiscordBotAdapter:
             # เริ่มลิปซิงค์พร้อมกับการเล่นเสียง (ถ้ามี motion_controller)
             lipsync_task = None
             if self.motion_controller is not None:
-                try:
-                    await self.motion_controller.set_talking(True)
-                except Exception:
-                    pass
                 lipsync_task = asyncio.create_task(self._lipsync_for_playback(audio_source))
 
             try:
@@ -500,7 +496,6 @@ class DiscordBotAdapter:
                 # ปิดปากและกลับสู่ idle อย่างนุ่มนวล
                 if self.motion_controller is not None:
                     try:
-                        await self.motion_controller.set_parameter_value("MouthOpen", 0.0)
                         await self.motion_controller.stop_speaking()
                         await self.motion_controller.update_idle_motion()
                     except Exception:
@@ -520,6 +515,14 @@ class DiscordBotAdapter:
                 if self.voice_client and self.voice_client.is_playing():
                     break
                 await asyncio.sleep(0.01)
+
+            # เปิดโหมดพูดเมื่อเริ่มเล่นจริง เพื่อลดการกระตุกก่อนเริ่มเสียง
+            try:
+                if self.motion_controller is not None:
+                    await self.motion_controller.set_talking(True)
+                    logger.info("🗣️ เริ่มลิปซิงค์หลังเสียงเริ่มเล่นจริง")
+            except Exception:
+                pass
 
             samples = getattr(audio_source, 'mono_samples', None)
             if samples is None or samples.size == 0:
@@ -595,6 +598,7 @@ class DiscordBotAdapter:
                     await self.motion_controller.set_parameter_value("MouthOpen", val, immediate=False)
                     await asyncio.sleep(0.015)
                 await self.motion_controller.set_parameter_value("MouthOpen", 0.0)
+                logger.info("🔚 จบลิปซิงค์และปิดปากอย่างนุ่มนวล")
             except Exception:
                 pass
         except Exception as e:
