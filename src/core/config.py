@@ -100,7 +100,8 @@ class VTubeStudioConfig:
     
     # Animation Settings
     # เพิ่มความถี่การอัปเดตเพื่อลดอาการดีเลย์ใน lip sync
-    idle_update_rate: float = 0.02
+    # อนุญาตให้ตั้งผ่าน .env: VTS_IDLE_UPDATE_RATE (เช่น 0.05 สำหรับ ~20 FPS)
+    idle_update_rate: float = float(os.getenv("VTS_IDLE_UPDATE_RATE", "0.02"))
     # เปิดการขยับสุ่มตอน idle (ปิดได้ผ่าน .env ถ้าต้องการ)
     idle_motion_enabled: bool = True
     smooth_factor: float = 0.15
